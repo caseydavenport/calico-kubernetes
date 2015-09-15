@@ -208,7 +208,9 @@ class Pod(Resource):
         try:
             self.ep_id = json["metadata"]["annotations"][EPID_ANNOTATION_KEY]
         except KeyError:
-            _log.error("Pod %s has no calico endpoint" % self.get_key())
+            # If the annotations do not contain a Calico endpoint, it is likely because the plugin
+            # hasn't processed this pod yet.
+            _log.info("Pod %s has no calico endpoint" % self.get_key())
             self.ep_id = None
 
     def get_key(self):
