@@ -302,10 +302,18 @@ def _keep_watch(queue, path):
     """
     Called by watcher threads. Adds watch events to Queue
     """
-    response = _get_api_stream("watch/%s" % path)
-    for line in response.iter_lines():
-        if line:
-            queue.put(line)
+    while True:
+        try:
+            response = _get_api_path("watch/%s" % path)
+            for line in response.iter_lines():
+                if line:
+                    queue.put(line)
+        except:
+            # If we hit an exception attempting to watch this path, log it, and retry the watch
+            # after a short sleep in order to prevent tight-looping.  We catch all BaseExceptions
+            # so that the thread never dies.
+            _log.exception("Exception watching path %s", path)
+            time.sleep(10)
 
 
 def _get_api_token():
