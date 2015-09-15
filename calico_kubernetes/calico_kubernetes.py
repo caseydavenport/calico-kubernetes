@@ -257,8 +257,7 @@ class NetworkPlugin(object):
         # Give Kubernetes a link to the endpoint
         resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
                         {"namespace": self.namespace, "podname": self.pod_name}
-        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % \
-                  (EPID_ANNOTATION_KEY, ep.endpoint_id)
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % (EPID_ANNOTATION_KEY, ep.endpoint_id)
         self._patch_api(path=resource_path, patch=ep_data)
 
         # Let the caller know what endpoint was created.
@@ -476,11 +475,13 @@ class NetworkPlugin(object):
         :return: A list of JSON API objects
         :rtype list
         """
-        logger.info('Getting API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
+        logger.info('Patching API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
+        logger.info('Patching API Resource: with %s', patch)
         bearer_token = self._get_api_token()
         session = requests.Session()
-        session.headers.update({'Authorization': 'Bearer ' + bearer_token})
-        response = session.patch(url=KUBE_API_ROOT+path, data=patch, verify=False)
+        session.headers.update({'Authorization': 'Bearer ' + bearer_token, 
+                                'Content-type': 'application/strategic-merge-patch+json'})
+        response = session.patch(url=KUBE_API_ROOT+path, data=patch, verify=True)
         response_body = response.text
 
         return json.loads(response_body)
