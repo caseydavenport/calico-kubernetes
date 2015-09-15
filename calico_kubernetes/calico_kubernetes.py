@@ -255,9 +255,9 @@ class NetworkPlugin(object):
         self._datastore_client.set_endpoint(ep)
 
         # Give Kubernetes a link to the endpoint
-        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % 
+        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
                         {"namespace": self.namespace, "podname": self.pod_name}
-        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % 
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % \
                   (EPID_ANNOTATION_KEY, ep.endpoint_id)
         self._patch_api(path=resource_path, patch=ep_data)
 
