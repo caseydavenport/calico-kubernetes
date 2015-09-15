@@ -27,7 +27,9 @@ DOCKER_VERSION = "1.16"
 ORCHESTRATOR_ID = "docker"
 HOSTNAME = socket.gethostname()
 
-POLICY_ANNOTATION_KEY = "projectcalico.org/policy"
+ANNOTATION_NAMESPACE = "projectcalico.org"
+POLICY_ANNOTATION_KEY = "%s/policy" % ANNOTATION_NAMESPACE
+EPID_ANNOTATION_KEY = "%s/endpointID" % ANNOTATION_NAMESPACE
 
 ETCD_AUTHORITY_ENV = "ETCD_AUTHORITY"
 if ETCD_AUTHORITY_ENV not in os.environ:
@@ -250,6 +252,13 @@ class NetworkPlugin(object):
         logger.info("Setting mac address %s to endpoint %s", ep.mac, ep.name)
         self._datastore_client.set_endpoint(ep)
 
+        # Give Kubernetes a link to the endpoint
+        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % 
+                        {"namespace": self.namespace, "podname": self.pod_name}
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % 
+                  (EPID_ANNOTATION_KEY, ep.endpoint_id)
+        self._patch_api(path=resource_path, patch=ep_data)
+
         # Let the caller know what endpoint was created.
         return ep
 
@@ -455,6 +464,24 @@ class NetworkPlugin(object):
         # The response body contains some metadata, and the pods themselves
         # under the 'items' key.
         return json.loads(response_body)['items']
+
+    def _patch_api(self, path, patch):
+        """
+        Patch an api resource to a given path
+
+        :param path: The relative path to an API endpoint.
+        :param patch: The updated data
+        :return: A list of JSON API objects
+        :rtype list
+        """
+        logger.info('Getting API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
+        bearer_token = self._get_api_token()
+        session = requests.Session()
+        session.headers.update({'Authorization': 'Bearer ' + bearer_token})
+        response = session.patch(url=KUBE_API_ROOT+path, data=patch, verify=False)
+        response_body = response.text
+
+        return json.loads(response_body)
 
     def _get_api_token(self):
         """

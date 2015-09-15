@@ -17,6 +17,10 @@ from pycalico.datastore_datatypes import Rules
 KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
                                'http://localhost:8080/api/v1/')
 
+ANNOTATION_NAMESPACE = "projectcalico.org"
+POLICY_ANNOTATION_KEY = "%s/policy" % ANNOTATION_NAMESPACE
+EPID_ANNOTATION_KEY = "%s/endpointID" % ANNOTATION_NAMESPACE
+
 POLICY_LOG_DIR = "/var/log/calico/calico-policy"
 POLICY_LOG = "%s/calico-policy.log" % POLICY_LOG_DIR
 
@@ -24,12 +28,12 @@ LOG_FORMAT = '%(asctime)s %(process)d %(levelname)s %(filename)s: %(message)s'
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 
 _log = logging.getLogger(__name__)
+_datastore_client = DatastoreClient()
 
 
 class PolicyAgent():
 
     def __init__(self):
-        self.client = DatastoreClient()
         self.q = Queue.Queue()
         self.pods = dict()
         self.services = dict()
@@ -76,6 +80,7 @@ class PolicyAgent():
                     "Resource %s not Pod, Service, or Namespace" % r_kind)
 
         except Queue.Empty:
+            self.resync()
             pass
 
     def process_resource(self, action, kind, target):
@@ -84,19 +89,19 @@ class PolicyAgent():
         """
         # Determine Resource Kind
         if kind == "Pod":
-            resource_bin = self.pods
+            resource_pool = self.pods
             obj = Pod(target)
 
         elif kind == "Service":
-            resource_bin = self.services
+            resource_pool = self.services
             obj = Service(target)
 
         elif kind == "Endpoints":
-            resource_bin = self.endpoints
+            resource_pool = self.endpoints
             obj = Endopints(target)
 
         elif kind == "Namespace":
-            resource_bin = self.namespaces
+            resource_pool = self.namespaces
             obj = Namespace(target)
 
         else:
@@ -106,8 +111,8 @@ class PolicyAgent():
         target_key = obj.key
 
         if action == "ADDED":
-            if target_key not in resource_bin:
-                resource_bin[target_key] = obj
+            if target_key not in resource_pool:
+                resource_pool[target_key] = obj
                 _log.info("%s added to Calico store" % target_key)
 
             else:
@@ -115,8 +120,8 @@ class PolicyAgent():
                            (obj, target_key))
 
         elif action == "DELETED":
-            if target_key in resource_bin:
-                del resource_bin[target_key]
+            if target_key in resource_pool:
+                del resource_pool[target_key]
                 _log.info("%s deleted from Calico store" % target_key)
 
             else:
@@ -125,10 +130,10 @@ class PolicyAgent():
                     (obj, target_key))
 
         elif action == "MODIFIED":
-            if target_key in resource_bin:
+            if target_key in resource_pool:
                 _log.info("Updating %s\n%s\n=====>\n%s" %
-                          (target_key, resource_bin[target_key], obj))
-                resource_bin[target_key] = obj
+                          (target_key, resource_pool[target_key], obj))
+                resource_pool[target_key] = obj
 
             else:
                 _log.warning("Tried to Modify %s, but %s was not in bin. "
@@ -136,30 +141,14 @@ class PolicyAgent():
                              (target_key, target_key))
                 self.process_resource(action="ADDED", kind=kind, target=obj)
 
-    def define_namespace_policy(self, namespace):
-        ns_tag = "namespace_%s" % namespace.name
-        profile_path = PROFILE_PATH % {"profile_id": ns_tag}
-        self.client.etcd_client.write(profile_path + "tags", '["%s"]' % ns_tag)
-        default_allow = Rule(action="allow")
-
-        if namespace.policy == "open":
-            rules = Rules(id=ns_tag,
-                      inbound_rules=[default_allow],
-                      outbound_rules=[default_allow])
-
-        elif namespace.policy == "closed":
-            rules = Rules(id=ns_tag,
-                      inbound_rules=[Rule(action="allow", src_tag=ns_tag)],
-                      outbound_rules=[default_allow])
-
-        else:
-            _log.error("Namespace %s policy is neither open nor closed" % namespace.name)
-            sys.exit(1)
-        
-        self.client.etcd_client.write(profile_path + "rules", rules.to_json())
+    def resync(self):
+        for resource_pool in [self.pods, self.services, self.endpoints, self.namespaces]:
+            for resource_key in resource_pool:
+                resource_pool[resource_key].resync()
 
 
 class Resource():
+
     def __init__(self, json):
         self.json = json
         self.from_json(json)
@@ -174,18 +163,40 @@ class Resource():
         return self.uid
 
     def resync(self):
-        self.needs_resync = False
+        if self.needs_resync:
+            self.sync()
+            self.needs_resync = False
+
+    def sync(self):
+        pass
+
+    def __str__(self):
+        return "%s: %s\n%s" % (self.kind, self.key, self.json)
 
 
 class Pod(Resource):
+
     def from_json(self, json):
         self.kind = "Pod"
         self.uid = json["metadata"]["uid"]
         self.name = json["metadata"]["name"]
         self.namespace = json["metadata"]["namespace"]
+        try:
+            self.ep_id = json["metadata"]["annotations"][EPID_ANNOTATION_KEY]
+    
+    def get_key(self):
+        return "%s/%s" % (self.namespace, self.name)
 
+    def sync(self):
+        ns_tag = "namespace_%s" % self.namespace
+
+        if _datastore_client.profile_exists(ns_tag):
+            _datastore_client.set_profiles_on_endpoint([ns_tag], endpoint_id=self.ep_id)
+        else:
+            _log.error("Pod Resource %s found before Namespace Resource %s" % (self.name, self.namespace))
 
 class Service(Resource):
+
     def from_json(self, json):
         self.kind = "Service"
         self.uid = json["metadata"]["uid"]
@@ -194,8 +205,9 @@ class Service(Resource):
 
 
 class Endpoints(Resource):
+
     def from_json(self, json):
-        self.kind = "Endopints"
+        self.kind = "Endpoints"
         self.selfLink = json["metadata"]["selfLink"]
         self.items = json["items"]
 
@@ -204,6 +216,7 @@ class Endpoints(Resource):
 
 
 class Namespace(Resource):
+
     def from_json(self, json):
             self.kind = "Namespace"
         try:
@@ -213,10 +226,39 @@ class Namespace(Resource):
             _log.error("Namespace does not have uid or name")
 
         try:
-            self.policy = json["metadata"]["annotations"]["projectcalico.org/policy"]
+            self.policy = json["metadata"]["annotations"][POLICY_ANNOTATION_KEY]
         except KeyError:
-            _log.warning("Namespace does not have policy, assumed open")
-            self.policy = "open"
+            _log.warning("Namespace does not have policy, assumed closed")
+            self.policy = "closed"
+
+    def sync(self):
+        # Derive NS tag
+        ns_tag = "namespace_%s" % self.name
+
+        # Add Tags
+        profile_path = PROFILE_PATH % {"profile_id": ns_tag}
+        _datastore_client.etcd_client.write(profile_path + "tags", '["%s"]' % ns_tag)
+
+        # Determine rule set based on policy
+        default_allow = Rule(action="allow")
+
+        if self.policy == "open":
+            rules = Rules(id=ns_tag,
+                      inbound_rules=[default_allow],
+                      outbound_rules=[default_allow])
+
+        elif self.policy == "closed":
+            rules = Rules(id=ns_tag,
+                      inbound_rules=[Rule(action="allow", src_tag=ns_tag)],
+                      outbound_rules=[default_allow])
+
+        else:
+            _log.error(
+                "Namespace %s policy is neither open nor closed" % self.name)
+            sys.exit(1)
+
+        # Write rules to profile
+        _datastore_client.etcd_client.write(profile_path + "rules", rules.to_json())
 
 
 def _keep_watch(queue, path):
