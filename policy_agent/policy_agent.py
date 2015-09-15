@@ -32,6 +32,9 @@ _datastore_client = DatastoreClient()
 
 
 class PolicyAgent():
+    """
+    The Policy Agent is responsible for maintaining Watch Threads/Queues and internal resource lists
+    """
 
     def __init__(self):
         self.q = Queue.Queue()
@@ -55,6 +58,9 @@ class PolicyAgent():
         self.EptsWatcher.daemon = True
 
     def run(self):
+        """
+        PolicyAgent.run() is called at program init to spawn watch threads and parse their responses 
+        """
         self.PodWatcher.start()
         self.SvcWatcher.start()
         self.NsWatcher.start()
@@ -64,6 +70,10 @@ class PolicyAgent():
             self.read_responses()
 
     def read_responses(self):
+        """
+        Read Responses pulls a response off the Queue and processes it
+        If no responses remain in the queue, it will trigger a resync for all resource lists
+        """
         try:
             response = self.q.get_nowait()
             r_json = json.loads(response)
@@ -81,13 +91,15 @@ class PolicyAgent():
 
         except Queue.Empty:
             self.resync()
-            pass
 
     def process_resource(self, action, kind, target):
         """
-        Takes a target object and an action and updates internal list
+        Takes a target object and an action and updates internal resource pools
+        :param action: String of ["ADDED", "DELETED", "MODIFIED"] (returned by api watch)
+        :param kind: String of ["Pod", "Namespace", "Service", "Endpoints"]
+        :param target: json dict of resource info
         """
-        # Determine Resource Kind
+        # Determine Resource Pool 
         if kind == "Pod":
             resource_pool = self.pods
             obj = Pod(target)
@@ -142,14 +154,23 @@ class PolicyAgent():
                 self.process_resource(action="ADDED", kind=kind, target=target)
 
     def resync(self):
+        """
+        Tells all resource objects to resync their profile information
+        """
         for resource_pool in [self.pods, self.services, self.endpoints, self.namespaces]:
             for resource_key in resource_pool:
                 resource_pool[resource_key].resync()
 
 
 class Resource():
+    """
+    Resource objects pull pertinent info from json blobs and maintain universal functions  
+    """
 
     def __init__(self, json):
+        """
+        On init, each Resource saves the raw json, pulls necessary info (unique), defines a unique key identifier, and sets self.needs_resync to True
+        """
         self.json = json
         self.from_json(json)
         self.key = self.get_key()
@@ -163,12 +184,15 @@ class Resource():
         return self.uid
 
     def resync(self):
+        """
+        Each Resource hits this loop. resyncs info with the datastore
+        """
         if self.needs_resync:
             if self.sync():
                 self.needs_resync = False
 
     def sync(self):
-        pass
+        return True
 
     def __str__(self):
         return "%s: %s\n%s" % (self.kind, self.key, self.json)
@@ -269,9 +293,13 @@ class Namespace(Resource):
 
         # Write rules to profile
         _datastore_client.etcd_client.write(profile_path + "rules", rules.to_json())
+        return True
 
 
 def _keep_watch(queue, path):
+    """
+    Called by watcher threads. Adds watch events to Queue
+    """
     response = _get_api_stream("watch/%s" % path)
     for line in response.iter_lines():
         if line:
@@ -296,10 +324,8 @@ def _get_api_token():
 
 
 def _get_api_stream(path):
-    """Get a resource from the API specified API path.
-
-    e.g.
-    _get_api_stream('pods')
+    """
+    Get a resource from the API specified API path.
 
     :param path: The relative path to an API endpoint.
     :return: A list of JSON API objects
@@ -311,27 +337,6 @@ def _get_api_stream(path):
     session = requests.Session()
     return session.get("%s%s" % (KUBE_API_ROOT, path),
                        verify=False, stream=True)
-
-def _get_api_pod(namespace, pod):
-    """Get a resource from the API specified API path.
-
-    e.g.
-    _get_api_stream('pods')
-
-    :param namespace: Namespace of desired pod.
-    :param pod: Name of desired pod.
-    :return: A list of JSON API objects
-    :rtype list
-    """
-    bearer_token = _get_api_token()
-    session = requests.Session()
-    session.headers.update({'Authorization': 'Bearer ' + bearer_token})
-    session = requests.Session()
-    pod_path = "%(api_root)snamespaces/%(namespace)s/pods/%(podname)s" % \
-                    {"api_root": KUBE_API_ROOT, 
-                     "namespace": self.namespace, 
-                     "podname": self.pod_name} 
-    return session.get(pod_path, verify=False)
 
 if __name__ == '__main__':
 
