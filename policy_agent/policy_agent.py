@@ -183,6 +183,9 @@ class Pod(Resource):
         self.namespace = json["metadata"]["namespace"]
         try:
             self.ep_id = json["metadata"]["annotations"][EPID_ANNOTATION_KEY]
+        except:
+            # CD4: TODO
+            pass
     
     def get_key(self):
         return "%s/%s" % (self.namespace, self.name)
@@ -218,7 +221,7 @@ class Endpoints(Resource):
 class Namespace(Resource):
 
     def from_json(self, json):
-            self.kind = "Namespace"
+        self.kind = "Namespace"
         try:
             self.uid = json["metadata"]["uid"]
             self.name = json["metadata"]["name"]

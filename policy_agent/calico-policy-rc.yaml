@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: calico-policy-agent 
+  namespace: kube-system 
+  labels:
+    version: v1
+    projectcalico.org/app: "policy-agent"
+spec:
+  replicas: 1 
+  selector:
+    version: v1
+    projectcalico.org/app: "policy-agent"
+  template:
+    metadata:
+      labels:
+        version: v1
+        projectcalico.org/app: "policy-agent"
+    spec:
+      containers:
+        - name: policy-agent 
+        image: calico/kubernetes-policy-agent 
+        resources:
+          limits:
+            cpu: 100m
+            memory: 50Mi
+      dnsPolicy: Default  # Don't use cluster DNS.
