@@ -12,7 +12,7 @@ from threading import Thread
 from subprocess import check_output
 from contextlib import closing
 from pycalico.datastore import DatastoreClient, PROFILE_PATH
-from pycalico.datastore_datatypes import Rules
+from pycalico.datastore_datatypes import Rules, Rule
 
 KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
                                'http://localhost:8080/api/v1/')
@@ -139,7 +139,7 @@ class PolicyAgent():
                 _log.warning("Tried to Modify %s, but %s was not in bin. "
                              "Treating as Addition" %
                              (target_key, target_key))
-                self.process_resource(action="ADDED", kind=kind, target=obj)
+                self.process_resource(action="ADDED", kind=kind, target=target)
 
     def resync(self):
         for resource_pool in [self.pods, self.services, self.endpoints, self.namespaces]:
@@ -164,8 +164,8 @@ class Resource():
 
     def resync(self):
         if self.needs_resync:
-            self.sync()
-            self.needs_resync = False
+            if self.sync():
+                self.needs_resync = False
 
     def sync(self):
         pass
@@ -183,17 +183,25 @@ class Pod(Resource):
         self.namespace = json["metadata"]["namespace"]
         try:
             self.ep_id = json["metadata"]["annotations"][EPID_ANNOTATION_KEY]
-    
+        except KeyError:
+            _log.error("Pod %s has no calico endpoint" % self.get_key())
+            self.ep_id = None
+
     def get_key(self):
         return "%s/%s" % (self.namespace, self.name)
 
     def sync(self):
         ns_tag = "namespace_%s" % self.namespace
 
-        if _datastore_client.profile_exists(ns_tag):
-            _datastore_client.set_profiles_on_endpoint([ns_tag], endpoint_id=self.ep_id)
+        if _datastore_client.profile_exists(ns_tag) and self.ep_id:
+            _datastore_client.set_profiles_on_endpoint(
+                [ns_tag], endpoint_id=self.ep_id)
+            return True
         else:
-            _log.error("Pod Resource %s found before Namespace Resource %s" % (self.name, self.namespace))
+            _log.error("Pod Resource %s found before Namespace Resource %s" % (
+                self.name, self.namespace))
+            return False
+
 
 class Service(Resource):
 
@@ -218,7 +226,7 @@ class Endpoints(Resource):
 class Namespace(Resource):
 
     def from_json(self, json):
-            self.kind = "Namespace"
+        self.kind = "Namespace"
         try:
             self.uid = json["metadata"]["uid"]
             self.name = json["metadata"]["name"]
@@ -246,11 +254,13 @@ class Namespace(Resource):
             rules = Rules(id=ns_tag,
                       inbound_rules=[default_allow],
                       outbound_rules=[default_allow])
+            _log.info("Applying Open Rules to NS Profile %s" % ns_tag)
 
         elif self.policy == "closed":
             rules = Rules(id=ns_tag,
                       inbound_rules=[Rule(action="allow", src_tag=ns_tag)],
                       outbound_rules=[default_allow])
+            _log.info("Applying Closed Rules to NS Profile %s" % ns_tag)
 
         else:
             _log.error(
@@ -262,7 +272,7 @@ class Namespace(Resource):
 
 
 def _keep_watch(queue, path):
-    response = _get_api_path("watch/%s" % path)
+    response = _get_api_stream("watch/%s" % path)
     for line in response.iter_lines():
         if line:
             queue.put(line)
@@ -285,11 +295,11 @@ def _get_api_token():
     return auth_data['BearerToken']
 
 
-def _get_api_path(path):
+def _get_api_stream(path):
     """Get a resource from the API specified API path.
 
     e.g.
-    _get_api_path('pods')
+    _get_api_stream('pods')
 
     :param path: The relative path to an API endpoint.
     :return: A list of JSON API objects
@@ -301,6 +311,27 @@ def _get_api_path(path):
     session = requests.Session()
     return session.get("%s%s" % (KUBE_API_ROOT, path),
                        verify=False, stream=True)
+
+def _get_api_pod(namespace, pod):
+    """Get a resource from the API specified API path.
+
+    e.g.
+    _get_api_stream('pods')
+
+    :param namespace: Namespace of desired pod.
+    :param pod: Name of desired pod.
+    :return: A list of JSON API objects
+    :rtype list
+    """
+    bearer_token = _get_api_token()
+    session = requests.Session()
+    session.headers.update({'Authorization': 'Bearer ' + bearer_token})
+    session = requests.Session()
+    pod_path = "%(api_root)snamespaces/%(namespace)s/pods/%(podname)s" % \
+                    {"api_root": KUBE_API_ROOT, 
+                     "namespace": self.namespace, 
+                     "podname": self.pod_name} 
+    return session.get(pod_path, verify=False)
 
 if __name__ == '__main__':
 
