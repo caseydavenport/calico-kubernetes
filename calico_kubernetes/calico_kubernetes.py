@@ -73,7 +73,7 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "%s_%s_%s" % (self.namespace, self.pod_name, str(self.docker_id)[:12])
+        self.profile_name = "REJECT_ALL" if CALICO_POLICY else "ALLOW_ALL"
 
         logger.info('Configuring docker container %s', self.docker_id)
 
@@ -154,22 +154,18 @@ class NetworkPlugin(object):
         logger.info('Configuring Pod Profile: %s', self.profile_name)
 
         if self._datastore_client.profile_exists(self.profile_name):
-            logger.error("Profile with name %s already exists, exiting.",
+            logger.warning("Profile with name %s already exists, exiting.",
                          self.profile_name)
-            sys.exit(1)
         else:
             self._datastore_client.create_profile(self.profile_name)
 
         self._apply_rules(pod)
 
-        self._apply_tags(pod)
-
         # Also set the profile for the workload.
         logger.info('Setting profile %s on endpoint %s',
                     self.profile_name, endpoint.endpoint_id)
-        self._datastore_client.set_profiles_on_endpoint(
-            [self.profile_name], endpoint_id=endpoint.endpoint_id
-        )
+        endpoint.profile_ids.append(self.profile_name)
+        self.update_endpoint(ep)
         logger.info('Finished configuring profile.')
 
     def _configure_interface(self):
@@ -580,51 +576,6 @@ class NetworkPlugin(object):
                 logger.error('Could not apply outbound rule %s.\n%s', rule, e)
 
         logger.info('Finished applying rules.')
-
-    def _apply_tags(self, pod):
-        """
-        In addition to Calico's default pod_name tag,
-        Add tags generated from Kubernetes Labels and Namespace
-            Ex. labels: {key:value} -> tags+= namespace_key_value
-        Add tag for namespace
-            Ex. namespace: default -> tags+= namespace_default
-
-        :param self.profile_name: The name of the Calico profile.
-        :type self.profile_name: string
-        :param pod: The config dictionary for the pod being created.
-        :type pod: dict
-        :return:
-        """
-        logger.info('Applying tags')
-
-        try:
-            profile = self._datastore_client.get_profile(self.profile_name)
-        except KeyError:
-            logger.error('Could not apply tags. Profile %s could not be found. Exiting', self.profile_name)
-            sys.exit(1)
-
-        # Grab namespace and create a tag if it exists.
-        ns_tag = self._get_namespace_tag(pod)
-
-        if ns_tag:
-            logger.info('Adding tag %s' % ns_tag)
-            profile.tags.add(ns_tag)
-        else:
-            logger.warning('Namespace tag cannot be generated')
-
-        # Create tags from labels
-        labels = self._get_metadata(pod, 'labels')
-        if labels:
-            for k, v in labels.iteritems():
-                tag = self._label_to_tag(k, v)
-                logger.info('Adding tag ' + tag)
-                profile.tags.add(tag)
-        else:
-            logger.warning('No labels found in pod %s' % pod)
-
-        self._datastore_client.profile_update_tags(profile)
-
-        logger.info('Finished applying tags.')
 
     def _get_metadata(self, pod, key):
         """
