@@ -4,10 +4,12 @@ SRCDIR=calico_kubernetes
 BUILD_DIR=build_calico_kubernetes
 BUILD_FILES=$(BUILD_DIR)/Dockerfile $(BUILD_DIR)/requirements.txt
 
+AGENT_FILES=$(wildcard policy_agent/*.py) 
 
 default: all
 all: binary test
 test: ut
+policy_agent: policyagent.created
 
 # Build a new docker image to be used by binary or tests
 kubernetesbuild.created: $(BUILD_FILES)
@@ -32,6 +34,10 @@ ut: kubernetesbuild.created
 	calico/kubernetes-build bash -c \
 	'>/dev/null 2>&1 & PYTHONPATH=/code/calico_kubernetes \
 	nosetests calico_kubernetes/tests -c nose.cfg'
+
+policyagent.created: $(AGENT_FILES)
+	docker build -t calico/kubernetes-policy-agent ./policy_agent
+	touch policyagent.created
 
 # UT runs on Cicle
 ut-circle: binary
