@@ -32,40 +32,29 @@ _datastore_client = DatastoreClient()
 
 
 class PolicyAgent():
-
     """
     The Policy Agent is responsible for maintaining Watch Threads/Queues and internal resource lists
     """
 
     def __init__(self):
         self.q = Queue.Queue()
-        self.pods = dict()
-        self.services = dict()
-        self.endpoints = dict()
         self.namespaces = dict()
+        self.services = dict()
+        self.pods = dict()
+        self.endpoints = dict()
 
+        self.changed_namespaces = dict()
+        self.changed_services = dict()
         self.changed_pods = dict()
         self.changed_endpoints = dict()
-        self.changed_namespaces = dict()
-
-        self.PodWatcher = Thread(target=_keep_watch,
-                                 args=(self.q, "pods"))
-        self.SvcWatcher = Thread(target=_keep_watch,
-                                 args=(self.q, "services"))
-        self.NsWatcher = Thread(target=_keep_watch,
-                                args=(self.q, "namespaces"))
-        self.EptsWatcher = Thread(target=_keep_watch,
-                                  args=(self.q, "endpoints"))
-
-        self.PodWatcher.daemon = True
-        self.SvcWatcher.daemon = True
-        self.NsWatcher.daemon = True
-        self.EptsWatcher.daemon = True
 
     def run(self):
         """
         PolicyAgent.run() is called at program init to spawn watch threads and parse their responses 
         """
+        self.init_lists()
+        self.init_threads()
+
         self.PodWatcher.start()
         self.SvcWatcher.start()
         self.NsWatcher.start()
@@ -73,6 +62,50 @@ class PolicyAgent():
 
         while True:
             self.read_responses()
+
+    def init_lists(self):
+        _log.info("Initializing Resource Lists")
+        initNamespaces = _get_api_list("namespaces")
+        initServices = _get_api_list("services")
+        initPods = _get_api_list("pods")
+        initEndpoints = _get_api_list("endpoints")
+
+        for ns in initNamespaces["items"]:
+            self.process_resource(action="ADDED", kind="Namespace", target=ns)
+
+        for svc in initServices["items"]:
+            self.process_resource(action="ADDED", kind="Service", target=svc)
+
+        for pod in initPods["items"]:
+            self.process_resource(action="ADDED", kind="Pod", target=pod)
+
+        for ep in initEndpoints["items"]:
+            self.process_resource(action="ADDED", kind="Endpoints", target=ep)
+
+        self.nsRV = initEndpoints["metadata"]["resourceVersion"]
+        self.svcRV = initServices["metadata"]["resourceVersion"]
+        self.poRV = initPods["metadata"]["resourceVersion"]
+        self.epRV = initNamespaces["metadata"]["resourceVersion"]
+
+        _log.info("Service Resource Version = %s" % self.svcRV)
+        _log.info("Namespace Resource Version = %s" % self.nsRV)
+        _log.info("Pod Resource Version = %s" % self.poRV)
+        _log.info("Endpoints Resource Version = %s" % self.epRV)
+
+    def init_threads(self):
+        self.NsWatcher = Thread(target=_keep_watch,
+                                args=(self.q, "namespaces", self.nsRV))
+        self.SvcWatcher = Thread(target=_keep_watch,
+                                 args=(self.q, "services", self.svcRV))
+        self.PodWatcher = Thread(target=_keep_watch,
+                                 args=(self.q, "pods", self.poRV))
+        self.EptsWatcher = Thread(target=_keep_watch,
+                                  args=(self.q, "endpoints", self.epRV))
+
+        self.NsWatcher.daemon = True
+        self.SvcWatcher.daemon = True
+        self.PodWatcher.daemon = True
+        self.EptsWatcher.daemon = True
 
     def read_responses(self):
         """
@@ -86,9 +119,10 @@ class PolicyAgent():
             r_obj = r_json["object"]
             r_kind = r_obj["kind"]
 
+
             _log.info("%s: %s" % (r_type, r_kind))
 
-            if r_kind in ["Pod", "Namespace", "Endpoints", "Service"]:
+            if r_kind in ["Namespace", "Service", "Pod", "Endpoints"]:
                 if r_type == "DELETED":
                     self.delete_resource(kind=r_kind, target=r_obj)
                 elif r_type in ["ADDED", "MODIFIED"]:
@@ -112,23 +146,22 @@ class PolicyAgent():
         :param target: json dict of resource info
         """
         # Determine Resource Pool
-        if kind == "Pod":
-            resource_pool = self.changed_pods
-            obj = Pod(target)
+        if kind == "Namespace":
+            resource_pool = self.changed_namespaces
+            obj = Namespace(target)
 
         elif kind == "Service":
-            # No intermediate processing on services
-            # TODO: trap changes to Service Type
-            resource_pool = self.services
+            resource_pool = self.changed_services
             obj = Service(target)
+            
+        elif kind == "Pod":
+            resource_pool = self.changed_pods
+            obj = Pod(target)
 
         elif kind == "Endpoints":
             resource_pool = self.changed_endpoints
             obj = Endpoints(target)
 
-        elif kind == "Namespace":
-            resource_pool = self.changed_namespaces
-            obj = Namespace(target)
 
         else:
             _log.error(
@@ -161,21 +194,21 @@ class PolicyAgent():
             _log.error("Event in process_resource not recognized: %s" % r_type)
 
     def delete_resource(kind, target):
-        if kind == "Pod":
-            resource_pool = self.pods
-            obj = Pod(target)
+        if kind == "Namespace":
+            resource_pool = self.namespaces
+            obj = Namespace(target)
 
         elif kind == "Service":
             resource_pool = self.services
             obj = Service(target)
 
+        elif kind == "Pod":
+            resource_pool = self.pods
+            obj = Pod(target)
+
         elif kind == "Endpoints":
             resource_pool = self.endpoints
             obj = Endpoints(target)
-
-        elif kind == "Namespace":
-            resource_pool = self.namespaces
-            obj = Namespace(target)
 
         target_key = obj.key
 
@@ -202,13 +235,21 @@ class PolicyAgent():
         # Create/update Namespace Profiles
         for namespace_key, ns in self.changed_namespaces.items():
             if ns.create_ns_profile():
+                self.nsRV = ns.RV
                 self.namespaces[namespace_key] = ns
                 del self.changed_namespaces[namespace_key]
+
+        # Process Services
+        for service_key, svc in self.changed_services.items():
+            self.svcRV = svc.RV
+            self.services[service_key] = svc
+            del self.changed_services[service_key]
 
         # Apply Namespace policy to new/updated pods
         for pod_key, po in self.changed_pods.items():
             if po.apply_ns_policy():
                 if po.remove_default_profile():
+                    self.poRV = po.RV
                     self.pods[pod_key] = po
                     del self.changed_pods[pod_key]
 
@@ -231,6 +272,8 @@ class PolicyAgent():
             except KeyError, AttributeError:
                 _log.warning("Namespace %s not yet in store" % ep.namespace)
                 continue
+
+            _log.info("Using svc policy %s and ns policy %s" % (svc_policy, ns_policy))
 
             # if namespace is open, or svc is closed, do nothing
             if ns_policy == "Open" or svc_policy == "NamespaceIP":
@@ -257,6 +300,7 @@ class PolicyAgent():
                             _log.warning("Pod %s is not yet processed" % (pod))    
 
                 # declare Endpoints obj processed
+                self.epRV = ep.RV
                 self.endpoints[ep_key] = ep
                 del self.changed_endpoints[ep_key]
 
@@ -272,6 +316,7 @@ class Resource():
         and defines a unique key identifier
         """
         self.json = json
+        self.RV = json["metadata"]["resourceVersion"]
         self.from_json(json)
         self.key = self.get_key()
 
@@ -284,6 +329,80 @@ class Resource():
 
     def __str__(self):
         return "%s: %s\n%s" % (self.kind, self.key, self.json)
+
+class Namespace(Resource):
+
+    def from_json(self, json):
+        self.kind = "Namespace"
+        self.name = json["metadata"]["name"]
+
+        try:
+            # self.policy = json["spec"]["networkPolicy"]
+            self.policy = json["metadata"]["annotations"]["networkPolicy"]
+        except KeyError:
+            _log.warning("Namespace does not have policy, assumed Open")
+            self.policy = "Open"
+
+    def get_key(self):
+        return self.name
+
+    def create_ns_profile(self):
+        # Derive NS tag
+        ns_tag = "namespace_%s" % self.name
+
+        # Add Tags
+        profile_path = PROFILE_PATH % {"profile_id": ns_tag}
+        _datastore_client.etcd_client.write(
+            profile_path + "tags", '["%s"]' % ns_tag)
+
+        # Determine rule set based on policy
+        default_allow = Rule(action="allow")
+
+        if self.policy == "Open":
+            rules = Rules(id=ns_tag,
+                          inbound_rules=[default_allow],
+                          outbound_rules=[default_allow])
+            _log.info("Applying Open Rules to NS Profile %s" % ns_tag)
+
+        elif self.policy == "Closed":
+            rules = Rules(id=ns_tag,
+                          inbound_rules=[Rule(action="allow", src_tag=ns_tag)],
+                          outbound_rules=[default_allow])
+            _log.info("Applying Closed Rules to NS Profile %s" % ns_tag)
+
+        else:
+            _log.error(
+                "Namespace %s policy is neither Open nor Closed" % self.name)
+            return False
+
+        # Write rules to profile
+        _datastore_client.etcd_client.write(
+            profile_path + "rules", rules.to_json())
+        return True
+
+    def delete_ns_profile(self):
+        # Derive NS tag
+        ns_tag = "namespace_%s" % self.name
+
+        # Remove from Store
+        _datastore_client.remove_profile(ns_tag)
+        return True
+
+
+class Service(Resource):
+
+    def from_json(self, json):
+        self.kind = "Service"
+        self.name = json["metadata"]["name"]
+        self.namespace = json["metadata"]["namespace"]
+        try:
+            self.type = json["spec"]["type"]
+        except KeyError:
+            _log.warning("Service Type not specified assuming NamespaceIP")
+            self.type = "NamespaceIP"
+
+    def get_key(self):
+        return "%s/%s" % (self.namespace, self.name)
 
 
 class Pod(Resource):
@@ -307,7 +426,7 @@ class Pod(Resource):
     def apply_ns_policy(self):
         ns_tag = "namespace_%s" % self.namespace
 
-        if _datastore_client.profile_exists(ns_tag) and self.ep_id:
+        if _datastore_client.profile_exists(ns_tag) and _datastore_client.get_endpoints(endpoint_id=self.ep_id):
             try:
                 _datastore_client.append_profiles_to_endpoint(profile_names=[ns_tag],
                                                               endpoint_id=self.ep_id)
@@ -325,7 +444,7 @@ class Pod(Resource):
         """
         remove the default reject all rule programmed by the plugin
         """
-        default_profile = "REJECT_ALL"
+        default_profile = "DENY_ALL"
         try:
             _log.info("Removing Default Profile")
             _datastore_client.remove_profiles_from_endpoint(profile_names=[default_profile],
@@ -337,22 +456,6 @@ class Pod(Resource):
         else:
             _log.info("Default Profile Removal Failed")
             return False
-
-
-class Service(Resource):
-
-    def from_json(self, json):
-        self.kind = "Service"
-        self.name = json["metadata"]["name"]
-        self.namespace = json["metadata"]["namespace"]
-        try:
-            self.type = json["spec"]["type"]
-        except KeyError:
-            _log.warning("Service Type not specified assuming NamespaceIP")
-            self.type = "NamespaceIP"
-
-    def get_key(self):
-        return "%s/%s" % (self.namespace, self.name)
 
 
 class Endpoints(Resource):
@@ -448,71 +551,13 @@ class Endpoints(Resource):
         return self.association_list
 
 
-class Namespace(Resource):
-
-    def from_json(self, json):
-        self.kind = "Namespace"
-        self.name = json["metadata"]["name"]
-
-        try:
-            self.policy = json["spec"]["networkPolicy"]
-        except KeyError:
-            _log.warning("Namespace does not have policy, assumed closed")
-            self.policy = "Open"
-
-    def get_key(self):
-        return self.name
-
-    def create_ns_profile(self):
-        # Derive NS tag
-        ns_tag = "namespace_%s" % self.name
-
-        # Add Tags
-        profile_path = PROFILE_PATH % {"profile_id": ns_tag}
-        _datastore_client.etcd_client.write(
-            profile_path + "tags", '["%s"]' % ns_tag)
-
-        # Determine rule set based on policy
-        default_allow = Rule(action="allow")
-
-        if self.policy == "Open":
-            rules = Rules(id=ns_tag,
-                          inbound_rules=[default_allow],
-                          outbound_rules=[default_allow])
-            _log.info("Applying Open Rules to NS Profile %s" % ns_tag)
-
-        elif self.policy == "Closed":
-            rules = Rules(id=ns_tag,
-                          inbound_rules=[Rule(action="allow", src_tag=ns_tag)],
-                          outbound_rules=[default_allow])
-            _log.info("Applying Closed Rules to NS Profile %s" % ns_tag)
-
-        else:
-            _log.error(
-                "Namespace %s policy is neither Open nor Closed" % self.name)
-            return False
-
-        # Write rules to profile
-        _datastore_client.etcd_client.write(
-            profile_path + "rules", rules.to_json())
-        return True
-
-    def delete_ns_profile(self):
-        # Derive NS tag
-        ns_tag = "namespace_%s" % self.name
-
-        # Remove from Store
-        _datastore_client.remove_profile(ns_tag)
-        return True
-
-
-def _keep_watch(queue, resource):
+def _keep_watch(queue, resource, resource_version):
     """
     Called by watcher threads. Adds watch events to Queue
     """
     while True:
         try:
-            response = _get_api_stream(resource)
+            response = _get_api_stream(resource, resource_version)
             for line in response.iter_lines():
                 if line:
                     queue.put(line)
@@ -541,7 +586,7 @@ def _get_api_token():
     return auth_data['BearerToken']
 
 
-def _get_api_stream(resource):
+def _get_api_stream(resource, resource_version):
     """
     Watch a stream from the API given a resource.
 
@@ -549,7 +594,7 @@ def _get_api_stream(resource):
     :return: A stream of json objs e.g. {"type": "MODIFED"|"ADDED"|"DELETED", "object":{...}}
     :rtype stream
     """
-    path = "watch/%s" % resource
+    path = "watch/%s?resourceVersion=%s" % (resource, resource_version)
     _log.info(
         'Streaming API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
     bearer_token = _get_api_token()
@@ -560,7 +605,7 @@ def _get_api_stream(resource):
                        verify=False, stream=True)
 
 
-def _get_api_obj(namespace, resource, name):
+def _get_api_list(resource):
     """
     Get a resource from the API specified API path.
     e.g.
@@ -572,13 +617,12 @@ def _get_api_obj(namespace, resource, name):
     :return: A JSON API object
     :rtype json dict
     """
-    path = "namespaces/%s/%s/%s" % (namespace, resource, name)
     _log.info(
-        'Getting API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
+        'Getting API Resource: %s from KUBE_API_ROOT: %s', resource, KUBE_API_ROOT)
     bearer_token = _get_api_token()
     session = requests.Session()
     session.headers.update({'Authorization': 'Bearer ' + bearer_token})
-    response = session.get(KUBE_API_ROOT + path, verify=False)
+    response = session.get(KUBE_API_ROOT + resource, verify=False)
     return json.loads(response.text)
 
 
