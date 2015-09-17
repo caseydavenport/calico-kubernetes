@@ -215,6 +215,13 @@ class NetworkPlugin(object):
         check_call(['ip', 'addr', 'add', node_ip + '/32',
                     'dev', interface_name])
 
+        # Give Kubernetes a link to the endpoint
+        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
+                        {"namespace": self.namespace, "podname": self.pod_name}
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % (
+            EPID_ANNOTATION_KEY, endpoint.endpoint_id)
+        self._patch_api(path=resource_path, patch=ep_data)
+
         logger.info('Finished configuring Calico network interface')
 
         return endpoint
