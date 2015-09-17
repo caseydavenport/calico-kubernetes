@@ -12,15 +12,16 @@ from threading import Thread
 from subprocess import check_output
 from contextlib import closing
 from pycalico.datastore_datatypes import Rules, Rule
-from pycalico.datastore_errors import ProfileNotInEndpoint
+from pycalico.datastore_errors import ProfileNotInEndpoint, ProfileAlreadyInEndpoint
 from pycalico.datastore import DatastoreClient, PROFILE_PATH
 
 KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
                                'http://localhost:8080/api/v1/')
 
-ANNOTATION_NAMESPACE = "projectcalico.org"
-POLICY_ANNOTATION_KEY = "%s/policy" % ANNOTATION_NAMESPACE
-EPID_ANNOTATION_KEY = "%s/endpointID" % ANNOTATION_NAMESPACE
+ANNOTATION_NAMESPACE = "projectcalico.org/"
+POLICY_ANNOTATION_KEY = "%spolicy" % ANNOTATION_NAMESPACE
+EPID_ANNOTATION_KEY = "%sendpointID" % ANNOTATION_NAMESPACE
+SVC_TYPE_ANNOTATION_KEY = "%stype" % ANNOTATION_NAMESPACE
 
 POLICY_LOG_DIR = "/var/log/calico/calico-policy"
 POLICY_LOG = "%s/calico-policy.log" % POLICY_LOG_DIR
@@ -46,7 +47,6 @@ class PolicyAgent():
         self.namespaces = dict()
 
         self.changed_pods = dict()
-        self.changed_services = dict()
         self.changed_endpoints = dict()
         self.changed_namespaces = dict()
 
@@ -90,17 +90,18 @@ class PolicyAgent():
 
             _log.info("%s: %s" % (r_type, r_kind))
 
-            if r_kind in ["Pod", "Namespace", "Service"]:
+            if r_kind in ["Pod", "Namespace", "Endpoints", "Service"]:
                 if r_type == "DELETED":
                     self.delete_resource(kind=r_kind, target=r_obj)
                 elif r_type in ["ADDED", "MODIFIED"]:
-                    self.process_resource(action=r_type, kind=r_kind, target=r_obj)
+                    self.process_resource(
+                        action=r_type, kind=r_kind, target=r_obj)
                 else:
                     _log.error("Event from watch not recognized: %s" % r_type)
 
             else:
                 _log.info(
-                    "Resource %s not Pod, Service, or Namespace" % r_kind)
+                    "Resource %s not Pod, Service, Endpoints or Namespace" % r_kind)
 
         except Queue.Empty:
             self.resync()
@@ -118,7 +119,8 @@ class PolicyAgent():
             obj = Pod(target)
 
         elif kind == "Service":
-            resource_pool = self.changed_services
+            # No intermediate processing on services
+            resource_pool = self.services
             obj = Service(target)
 
         elif kind == "Endpoints":
@@ -130,7 +132,8 @@ class PolicyAgent():
             obj = Namespace(target)
 
         else:
-            _log.error("resource %s not Pod, Service, or Namespace" % kind)
+            _log.error(
+                "resource %s not Pod, Service, Endpoints or Namespace" % kind)
             return
 
         target_key = obj.key
@@ -138,24 +141,23 @@ class PolicyAgent():
         if action == "ADDED":
             if target_key not in resource_pool:
                 resource_pool[target_key] = obj
-                _log.info("%s added to Calico store" % target_key)
+                _log.info("%s %s added to Calico store" % (kind, target_key))
 
             else:
-                _log.error("Tried to Add %s, but %s already in bin" %
-                           (obj, target_key))
+                _log.error("Tried to Add %s %s, but it was already in bin" %
+                           (kind, target_key))
 
         elif action == "MODIFIED":
             if target_key in resource_pool:
-                _log.info("Updating\n%s\n=====>\n%s" %
-                          (resource_pool[target_key], obj))
+                _log.info("Updating %s %s" % (kind, target_key))
                 resource_pool[target_key] = obj
 
             else:
-                _log.warning("Tried to Modify %s, but %s was not in bin. "
+                _log.warning("Tried to Modify %s %s, but it was not in bin. "
                              "Treating as Addition" %
-                             (target_key, target_key))
+                             (kind, target_key))
                 self.process_resource(action="ADDED", kind=kind, target=target)
-        
+
         else:
             _log.error("Event in process_resource not recognized: %s" % r_type)
 
@@ -175,36 +177,86 @@ class PolicyAgent():
         elif kind == "Namespace":
             resource_pool = self.namespaces
             obj = Namespace(target)
-        
+
         target_key = obj.key
 
         if target_key in resource_pool:
             del resource_pool[target_key]
-            _log.info("%s deleted from Calico store" % target_key)
+            _log.info("%s %s deleted from Calico store" % (kind, target_key))
 
         else:
             _log.error(
-                "Tried to Delete %s, but %s was not in bin" %
-                (obj, target_key))
+                "Tried to Delete %s %s but it was not in bin" %
+                (kind, target_key))
+
+    def match_pod(self, namespace, name):
+        try:
+            return self.pods["%s/%s" % (namespace, name)]
+        except KeyError:
+            _log.error("Pod %s in NS %s not processed" % (name, namespace))
+            return None
 
     def resync(self):
         """
-        Tells all resource objects to resync their profile information
+        Updates Calico store with new resource information
         """
-        for resource_pool in [self.pods, self.services, self.endpoints, self.namespaces]:
-            for resource_key in resource_pool:
-                resource_pool[resource_key].resync()
-
-        for namespace_key in self.changed_namespaces:
-            if self.changed_namespaces[namespace_key].create_ns_profile():
-                self.namespaces[namespace_key] = self.changed_namespaces[namespace_key]
+        # Create/update Namespace Profiles
+        for namespace_key, ns in self.changed_namespaces.items():
+            if ns.create_ns_profile():
+                self.namespaces[namespace_key] = ns
                 del self.changed_namespaces[namespace_key]
 
-        for pod_key in self.changed_pods:
-            if self.changed_pods[pod_key].apply_ns_policy():
-                if self.changed_pods[pod_key].remove_default_profile()
-                    self.pods[pod_key] = self.changed_pods[pod_key]
+        # Apply Namespace policy to new/updated pods
+        for pod_key, po in self.changed_pods.items():
+            if po.apply_ns_policy():
+                if po.remove_default_profile():
+                    self.pods[pod_key] = po
                     del self.changed_pods[pod_key]
+
+        # As endpoint lists change, create/add new profiles to pods as
+        # necessary
+        for ep_key, ep in self.changed_endpoints.items():
+
+            # Get policy of the Service and namespace. Uses same namespace/name
+            # dict key.
+            try:
+                svc_policy = self.services[ep_key].type
+            except KeyError:
+                _log.warning("Service %s not yet in store" % ep_key)
+                continue
+
+            try:
+                ns_policy = self.namespaces[ep.namespace].policy
+            except KeyError, AttributeError:
+                _log.warning("Namespace %s not yet in store" % ep.namespace)
+                continue
+
+            # if namespace is open, or svc is closed, do nothing
+            if ns_policy == "open" or svc_policy == "closed":
+                self.endpoints[ep_key] = ep
+                del self.changed_endpoints[ep_key]
+
+            # else define service policy
+            else:
+                # find pods and append profiles
+                for association in ep.generate_svc_profile_pod_list():
+                    profiles = association[0]
+                    for pod in association[1]:
+                        existing_pod = self.match_pod(
+                            namespace=ep.namespace, name=pod)
+                        if existing_pod:
+                            _log.info("Adding profiles %s to pod %s" % (profiles, existing_pod))
+                            try:
+                                _datastore_client.append_profiles_to_endpoint(profile_names=profiles,
+                                                                              endpoint_id=existing_pod.ep_id)
+                            except ProfileAlreadyInEndpoint:
+                                _log.warning(
+                                    "Apply %s to Pod %s : Profile Already exists" % (profiles, existing_pod.key))
+
+
+                # declare Endpoints obj processed
+                self.endpoints[ep_key] = ep
+                del self.changed_endpoints[ep_key]
 
 
 class Resource():
@@ -244,7 +296,8 @@ class Pod(Resource):
         except KeyError:
             # If the annotations do not contain a Calico endpoint, it is likely because the plugin
             # hasn't processed this pod yet.
-            _log.info("Pod %s has no calico endpoint" % self.get_key())
+            _log.warning(
+                "Pod %s does not yet have a Calico Endpoint" % self.get_key())
             self.ep_id = None
 
     def get_key(self):
@@ -254,9 +307,13 @@ class Pod(Resource):
         ns_tag = "namespace_%s" % self.namespace
 
         if _datastore_client.profile_exists(ns_tag) and self.ep_id:
-            ep = _datastore_client.get_endpoint(endpoint_id=self.ep_id)
-            ep.profile_ids.append(ns_tag)
-            _datastore_client.update_endpoint(ep)
+            try:
+                _datastore_client.append_profiles_to_endpoint(profile_names=[ns_tag],
+                                                              endpoint_id=self.ep_id)
+            except ProfileAlreadyInEndpoint:
+                _log.warning(
+                    "Apply %s to Pod %s : Profile Already exists" % (ns_tag, self.key))
+                pass
             return True
         else:
             _log.error("Pod Resource %s found before Namespace Resource %s" % (
@@ -270,7 +327,8 @@ class Pod(Resource):
         default_profile = "REJECT_ALL"
         try:
             _log.info("Removing Default Profile")
-            _datastore_client.remove_profiles_from_endpoint(profile_names=[default_profile], endpoint_id=self.ep_id)
+            _datastore_client.remove_profiles_from_endpoint(profile_names=[default_profile],
+                                                            endpoint_id=self.ep_id)
             return True
         except ProfileNotInEndpoint:
             _log.info("Default Profile not on Endpoint")
@@ -286,30 +344,109 @@ class Service(Resource):
         self.kind = "Service"
         self.name = json["metadata"]["name"]
         self.namespace = json["metadata"]["namespace"]
+        try:
+            self.type = json["metadata"]["annotations"][SVC_TYPE_ANNOTATION_KEY]
+        except KeyError:
+            _log.warning("Service Type not specified assuming closed")
+            self.type = "closed"
 
     def get_key(self):
         return "%s/%s" % (self.namespace, self.name)
+
 
 class Endpoints(Resource):
 
     def from_json(self, json):
         self.kind = "Endpoints"
-        self.selfLink = json["metadata"]["selfLink"]
-        self.items = json["items"]
+        self.name = json["metadata"]["name"]
+        self.namespace = json["metadata"]["namespace"]
+        self.subsets = json["subsets"]
 
     def get_key(self):
-        return self.selfLink
+        return "%s/%s" % (self.namespace, self.name)
+
+    def generate_svc_profile_pod_list(self):
+        """
+        Endpoints objects contain a list of subsets
+        containing pod and policy info
+        subsets: [
+            {
+                addresses: [
+                    ...pods...
+                ],
+                ports: [
+                    ...associated ports...
+                ]
+            },
+            {
+                addresses: [
+                    ...pods...
+                ],
+                ports: [
+                    ...associated ports...
+                ]
+            },
+        ]
+        :return: A generated list of pod-profile associations
+        :rtype: a list of structs each containing
+                a list of profiles and a list of assoc pods
+                list( struct(list(str), list(str)) )
+        e.g. [([prof1, prof2], [pod1, pod2]), ([prof3], [pod1])]
+        """
+        def verify_args(ports_obj, try_arg):
+            try:
+                arg = ports_obj[try_arg]
+            except KeyError:
+                arg = None
+            return arg
+
+        self.association_list = list()
+        for subset in self.subsets:
+
+            # Generate a list of new svc profiles per port spec
+            profiles = list()
+            for port_spec in subset["ports"]:
+                dst_port = verify_args(port_spec, "port")
+                protocol = verify_args(port_spec, "protocol")
+
+                # Create Profile for port spec
+                prof_name = "svc_%s_%s_port_%s" % (
+                    self.namespace, self.name, dst_port)
+                if not _datastore_client.profile_exists(prof_name):
+                    profile_path = PROFILE_PATH % {"profile_id": prof_name}
+                    _datastore_client.etcd_client.write(
+                        profile_path + "tags", '["%s"]' % prof_name)
+
+                    # Determine rule set
+                    default_allow = Rule(action="allow")
+                    rules = Rules(id=prof_name,
+                                  inbound_rules=[Rule(action="allow",
+                                                      dst_ports=[dst_port],
+                                                      protocol=protocol)],
+                                  outbound_rules=[default_allow])
+
+                    # Write rules to profile
+                    _datastore_client.etcd_client.write(
+                        profile_path + "rules", rules.to_json())
+
+                profiles.append(prof_name)
+
+            # Generate list of pod names
+            pods = list()
+            for pod in subset["addresses"]:
+                pods.append(pod["targetRef"]["name"])
+
+            self.association_list.append((profiles, pods))
+
+        _log.info("association list:\n%s" % self.association_list)
+        return self.association_list
 
 
 class Namespace(Resource):
 
     def from_json(self, json):
         self.kind = "Namespace"
-        try:
-            self.uid = json["metadata"]["uid"]
-            self.name = json["metadata"]["name"]
-        except KeyError:
-            _log.error("Namespace does not have uid or name")
+        self.name = json["metadata"]["name"]
 
         try:
             self.policy = json["metadata"][
@@ -364,11 +501,11 @@ class Namespace(Resource):
         return True
 
 
-def _keep_watch(queue, path):
+def _keep_watch(queue, resource):
     """
     Called by watcher threads. Adds watch events to Queue
     """
-    response = _get_api_stream("watch/%s" % path)
+    response = _get_api_stream(resource)
     for line in response.iter_lines():
         if line:
             queue.put(line)
@@ -391,20 +528,46 @@ def _get_api_token():
     return auth_data['BearerToken']
 
 
-def _get_api_stream(path):
+def _get_api_stream(resource):
     """
-    Get a resource from the API specified API path.
+    Watch a stream from the API given a resource.
 
-    :param path: The relative path to an API endpoint.
-    :return: A list of JSON API objects
-    :rtype list
+    :param resource: The plural resource you would like to watch.
+    :return: A stream of json objs e.g. {"type": "MODIFED"|"ADDED"|"DELETED", "object":{...}}
+    :rtype stream
     """
+    path = "watch/%s" % resource
+    _log.info(
+        'Streaming API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
     bearer_token = _get_api_token()
     session = requests.Session()
     session.headers.update({'Authorization': 'Bearer ' + bearer_token})
     session = requests.Session()
     return session.get("%s%s" % (KUBE_API_ROOT, path),
                        verify=False, stream=True)
+
+
+def _get_api_obj(namespace, resource, name):
+    """
+    Get a resource from the API specified API path.
+    e.g.
+    _get_api_path(default, service, nginx)
+
+    :param namespace:
+    :param resource: plural resource type
+    :param name:
+    :return: A JSON API object
+    :rtype json dict
+    """
+    path = "namespaces/%s/%s/%s" % (namespace, resource, name)
+    _log.info(
+        'Getting API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
+    bearer_token = _get_api_token()
+    session = requests.Session()
+    session.headers.update({'Authorization': 'Bearer ' + bearer_token})
+    response = session.get(KUBE_API_ROOT + path, verify=False)
+    return json.loads(response.text)
+
 
 if __name__ == '__main__':
 

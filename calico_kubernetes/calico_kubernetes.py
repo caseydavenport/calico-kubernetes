@@ -14,7 +14,7 @@ from netaddr import IPAddress, AddrFormatError
 from logutils import configure_logger
 import pycalico
 from pycalico import netns
-from pycalico.datastore import IF_PREFIX, DatastoreClient
+from pycalico.datastore import IF_PREFIX, DatastoreClient, PROFILE_PATH
 from pycalico.util import generate_cali_interface_name, get_host_ips
 from pycalico.ipam import IPAMClient
 from pycalico.block import AlreadyAssignedError
@@ -45,9 +45,9 @@ KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
 # Flag to indicate whether or not to use Calico IPAM.
 # If False, use the default docker container ip address to create container.
 # If True, use libcalico's auto_assign IPAM to create container.
-CALICO_IPAM = os.environ.get('CALICO_IPAM', 'false')
+CALICO_IPAM = os.environ.get('CALICO_IPAM', 'true')
 
-CALICO_POLICY = os.environ.get('CALICO_POLICY', 'false')
+CALICO_POLICY = os.environ.get('CALICO_POLICY', 'true')
 
 CALICO_NETWORKING = os.environ.get('CALICO_NETWORKING', 'true')
 
@@ -73,7 +73,7 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "REJECT_ALL" if CALICO_POLICY else "ALLOW_ALL"
+        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
 
         logger.info('Configuring docker container %s', self.docker_id)
 
@@ -90,7 +90,7 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "%s_%s_%s" % (self.namespace, self.pod_name, str(self.docker_id)[:12])
+        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
 
         logger.info('Deleting container %s with profile %s',
                     self.docker_id, self.profile_name)
@@ -154,18 +154,18 @@ class NetworkPlugin(object):
         logger.info('Configuring Pod Profile: %s', self.profile_name)
 
         if self._datastore_client.profile_exists(self.profile_name):
-            logger.warning("Profile with name %s already exists, exiting.",
+            logger.warning("Profile with name %s already exists.",
                          self.profile_name)
         else:
             self._datastore_client.create_profile(self.profile_name)
-
-        self._apply_rules(pod)
+            self._apply_rules()
 
         # Also set the profile for the workload.
         logger.info('Setting profile %s on endpoint %s',
                     self.profile_name, endpoint.endpoint_id)
-        endpoint.profile_ids.append(self.profile_name)
-        self.update_endpoint(ep)
+
+        self._datastore_client.append_profiles_to_endpoint(profile_names=[self.profile_name], 
+                                                           endpoint_id=endpoint.endpoint_id)
         logger.info('Finished configuring profile.')
 
     def _configure_interface(self):
@@ -501,7 +501,7 @@ class NetworkPlugin(object):
         auth_data = json.loads(json_string)
         return auth_data['BearerToken']
 
-    def _generate_rules(self, pod):
+    def _generate_rules(self):
         """
         Returns two lists of rules (inbound and outbound) based on the CALICO_POLICY
         environment variable.
@@ -522,7 +522,7 @@ class NetworkPlugin(object):
 
         return inbound_rules, outbound_rules
 
-    def _apply_rules(self, pod):
+    def _apply_rules(self):
         """
         Generate a rules for a given profile based on annotations.
         1) Remove Calicoctl default rules
@@ -533,102 +533,30 @@ class NetworkPlugin(object):
             If no policy in annotations, allow from pod's Namespace
             Outbound policy should allow all traffic
 
-        :param pod: pod info to parse
-        :type pod: dict()
         :return:
         """
         try:
             profile = self._datastore_client.get_profile(self.profile_name)
         except:
-            logger.exception("ERROR: Could not apply rules. Profile not found: %s, exiting", self.profile_name)
+            logger.error("Could not apply rules. Profile not found: %s, exiting", self.profile_name)
             sys.exit(1)
 
-        inbound_rules, outbound_rules = self._generate_rules(pod)
+        # Determine rule set based on policy
+        if CALICO_POLICY == 'true':
+            default_rule = Rule(action="reject")
+        else:
+            default_rule = Rule(action="allow")
 
-        logger.info("Removing Default Rules")
+        rules = Rules(id=profile.name,
+                      inbound_rules=[default_rule],
+                      outbound_rules=[default_rule])
 
-        # TODO: This method is append-only, not profile replacement, we need to replace calicoctl calls
-        #       but necessary functions are not available in pycalico ATM
-
-        # Remove default rules. Assumes 2 in, 1 out.
-        try:
-            self.calicoctl('profile', self.profile_name, 'rule', 'remove', 'inbound', '--at=2')
-            self.calicoctl('profile', self.profile_name, 'rule', 'remove', 'inbound', '--at=1')
-            self.calicoctl('profile', self.profile_name, 'rule', 'remove', 'outbound', '--at=1')
-        except sh.ErrorReturnCode as e:
-            logger.error('Could not delete default rules for profile %s '
-                         '(assumed 2 inbound, 1 outbound)\n%s', self.profile_name, e)
-
-        # Call calicoctl to populate inbound rules
-        for rule in inbound_rules:
-            logger.info('applying inbound rule \n%s', rule)
-            try:
-                self.calicoctl('profile', self.profile_name, 'rule', 'add', 'inbound', rule)
-            except sh.ErrorReturnCode as e:
-                logger.error('Could not apply inbound rule %s.\n%s', rule, e)
-
-        # Call calicoctl to populate outbound rules
-        for rule in outbound_rules:
-            logger.info('applying outbound rule \n%s' % rule)
-            try:
-                self.calicoctl('profile', self.profile_name, 'rule', 'add', 'outbound', rule)
-            except sh.ErrorReturnCode as e:
-                logger.error('Could not apply outbound rule %s.\n%s', rule, e)
+        # Write rules to profile
+        profile_path = PROFILE_PATH % {"profile_id": profile.name}
+        _datastore_client.etcd_client.write(
+            profile_path + "rules", rules.to_json())
 
         logger.info('Finished applying rules.')
-
-    def _get_metadata(self, pod, key):
-        """
-        Return Metadata[key] Object given Pod
-        Returns None if no key-value exists
-        """
-        try:
-            val = pod['metadata'][key]
-        except (KeyError, TypeError):
-            logger.warning('No %s found in pod %s', key, pod)
-            return None
-
-        logger.debug("%s of pod %s:\n%s", key, pod, val)
-        return val
-
-    def _escape_chars(self, unescaped_string):
-        """
-        Calico can only handle 3 special chars, '_.-'
-        This function uses regex sub to replace SCs with '_'
-        """
-        # Character to replace symbols
-        swap_char = '_'
-
-        # If swap_char is in string, double it.
-        unescaped_string = re.sub(swap_char, "%s%s" % (swap_char, swap_char), unescaped_string)
-
-        # Substitute all invalid chars.
-        return re.sub('[^a-zA-Z0-9\.\_\-]', swap_char, unescaped_string)
-
-    def _get_namespace_tag(self, pod):
-        """
-        Pull metadata for namespace and return it and a generated NS tag
-        """
-        ns_tag = self._escape_chars('%s=%s' % ('namespace', self.namespace))
-        return ns_tag
-
-    def _label_to_tag(self, label_key, label_value):
-        """
-        Labels are key-value pairs, tags are single strings. This function handles that translation
-        1) Concatenate key and value with '='
-        2) Prepend a pod's namespace followed by '/' if available
-        3) Escape the generated string so it is Calico compatible
-        :param label_key: key to label
-        :param label_value: value to given key for a label
-        :param namespace: Namespace string, input None if not available
-        :param types: (self, string, string, string)
-        :return single string tag
-        :rtype string
-        """
-        tag = '%s=%s' % (label_key, label_value)
-        tag = '%s/%s' % (self.namespace, tag)
-        tag = self._escape_chars(tag)
-        return tag
 
 
 if __name__ == '__main__':
