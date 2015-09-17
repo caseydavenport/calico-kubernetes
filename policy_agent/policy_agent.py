@@ -19,12 +19,10 @@ KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
                                'http://localhost:8080/api/v1/')
 
 ANNOTATION_NAMESPACE = "projectcalico.org/"
-POLICY_ANNOTATION_KEY = "%spolicy" % ANNOTATION_NAMESPACE
 EPID_ANNOTATION_KEY = "%sendpointID" % ANNOTATION_NAMESPACE
-SVC_TYPE_ANNOTATION_KEY = "%stype" % ANNOTATION_NAMESPACE
 
-POLICY_LOG_DIR = "/var/log/calico/calico-policy"
-POLICY_LOG = "%s/calico-policy.log" % POLICY_LOG_DIR
+POLICY_LOG_DIR = "/var/log/calico/policy"
+POLICY_LOG = "%s/calico.log" % POLICY_LOG_DIR
 
 LOG_FORMAT = '%(asctime)s %(process)d %(levelname)s %(filename)s: %(message)s'
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -120,6 +118,7 @@ class PolicyAgent():
 
         elif kind == "Service":
             # No intermediate processing on services
+            # TODO: trap changes to Service Type
             resource_pool = self.services
             obj = Service(target)
 
@@ -215,6 +214,8 @@ class PolicyAgent():
 
         # As endpoint lists change, create/add new profiles to pods as
         # necessary
+        # TODO: if some object not ready for resync, finish loop w/out moving to 
+        # processed list
         for ep_key, ep in self.changed_endpoints.items():
 
             # Get policy of the Service and namespace. Uses same namespace/name
@@ -232,27 +233,28 @@ class PolicyAgent():
                 continue
 
             # if namespace is open, or svc is closed, do nothing
-            if ns_policy == "open" or svc_policy == "closed":
+            if ns_policy == "Open" or svc_policy == "NamespaceIP":
                 self.endpoints[ep_key] = ep
                 del self.changed_endpoints[ep_key]
 
             # else define service policy
             else:
                 # find pods and append profiles
-                for association in ep.generate_svc_profile_pod_list():
-                    profiles = association[0]
-                    for pod in association[1]:
+                associations = ep.generate_svc_profiles_pods()
+                for profile, pods in associations.items():
+                    for pod in pods:
                         existing_pod = self.match_pod(
                             namespace=ep.namespace, name=pod)
+                        #_log.info("Adding profile %s to pod %s" % (profile, existing_pod))    
                         if existing_pod:
-                            _log.info("Adding profiles %s to pod %s" % (profiles, existing_pod))
                             try:
-                                _datastore_client.append_profiles_to_endpoint(profile_names=profiles,
+                                _datastore_client.append_profiles_to_endpoint(profile_names=[profile],
                                                                               endpoint_id=existing_pod.ep_id)
                             except ProfileAlreadyInEndpoint:
                                 _log.warning(
-                                    "Apply %s to Pod %s : Profile Already exists" % (profiles, existing_pod.key))
-
+                                    "Applying %s to Pod %s : Profile Already exists" % (profiles, existing_pod.key))
+                        else:
+                            _log.warning("Pod %s is not yet processed" % (pod))    
 
                 # declare Endpoints obj processed
                 self.endpoints[ep_key] = ep
@@ -260,7 +262,6 @@ class PolicyAgent():
 
 
 class Resource():
-
     """
     Resource objects pull pertinent info from json blobs and maintain universal functions  
     """
@@ -345,10 +346,10 @@ class Service(Resource):
         self.name = json["metadata"]["name"]
         self.namespace = json["metadata"]["namespace"]
         try:
-            self.type = json["metadata"]["annotations"][SVC_TYPE_ANNOTATION_KEY]
+            self.type = json["spec"]["type"]
         except KeyError:
-            _log.warning("Service Type not specified assuming closed")
-            self.type = "closed"
+            _log.warning("Service Type not specified assuming NamespaceIP")
+            self.type = "NamespaceIP"
 
     def get_key(self):
         return "%s/%s" % (self.namespace, self.name)
@@ -365,7 +366,7 @@ class Endpoints(Resource):
     def get_key(self):
         return "%s/%s" % (self.namespace, self.name)
 
-    def generate_svc_profile_pod_list(self):
+    def generate_svc_profiles_pods(self):
         """
         Endpoints objects contain a list of subsets
         containing pod and policy info
@@ -387,11 +388,8 @@ class Endpoints(Resource):
                 ]
             },
         ]
-        :return: A generated list of pod-profile associations
-        :rtype: a list of structs each containing
-                a list of profiles and a list of assoc pods
-                list( struct(list(str), list(str)) )
-        e.g. [([prof1, prof2], [pod1, pod2]), ([prof3], [pod1])]
+        :return: A generated dict of profile-pod associations
+        :rtype: a dict of profiles mapping to a list of assoc pods
         """
         def verify_args(ports_obj, try_arg):
             try:
@@ -400,43 +398,51 @@ class Endpoints(Resource):
                 arg = None
             return arg
 
-        self.association_list = list()
+        self.association_list = dict()
         for subset in self.subsets:
 
             # Generate a list of new svc profiles per port spec
-            profiles = list()
+            port_rules = list()
             for port_spec in subset["ports"]:
                 dst_port = verify_args(port_spec, "port")
                 protocol = verify_args(port_spec, "protocol")
+                if protocol and dst_port:
+                    port_rules.append(Rule(action="allow",
+                                           dst_ports=[dst_port],
+                                           protocol=protocol))
 
-                # Create Profile for port spec
-                prof_name = "svc_%s_%s_port_%s" % (
-                    self.namespace, self.name, dst_port)
-                if not _datastore_client.profile_exists(prof_name):
-                    profile_path = PROFILE_PATH % {"profile_id": prof_name}
-                    _datastore_client.etcd_client.write(
-                        profile_path + "tags", '["%s"]' % prof_name)
+            # Create Profile for the subset
+            # TODO: better profile names
+            profile_name = "svc_%s_%s_port_%s_protocol_%s" % (
+                self.namespace, self.name, dst_port, protocol)
+            _log.info("Adding Profile %s to Store" % profile_name)
 
-                    # Determine rule set
-                    default_allow = Rule(action="allow")
-                    rules = Rules(id=prof_name,
-                                  inbound_rules=[Rule(action="allow",
-                                                      dst_ports=[dst_port],
-                                                      protocol=protocol)],
-                                  outbound_rules=[default_allow])
+            if not _datastore_client.profile_exists(profile_name):
+                _log.info("Creating Profile %s in Store" % profile_name)
+                profile_path = PROFILE_PATH % {"profile_id": profile_name}
+                _datastore_client.etcd_client.write(
+                    profile_path + "tags", '["%s"]' % profile_name)
 
-                    # Write rules to profile
-                    _datastore_client.etcd_client.write(
-                        profile_path + "rules", rules.to_json())
+                # Determine rule set
+                default_allow = Rule(action="allow")
+                rules = Rules(id=profile_name,
+                              inbound_rules=port_rules,
+                              outbound_rules=[default_allow])
 
-                profiles.append(prof_name)
+                # Write rules to profile
+                _datastore_client.etcd_client.write(
+                    profile_path + "rules", rules.to_json())
+
+            else:
+                _log.warning("Profile %s already in Store" % profile_name)
 
             # Generate list of pod names
             pods = list()
             for pod in subset["addresses"]:
                 pods.append(pod["targetRef"]["name"])
 
-            self.association_list.append((profiles, pods))
+            # Assumes profile does not exist
+            self.association_list[profile_name] = pods
 
         _log.info("association list:\n%s" % self.association_list)
         return self.association_list
@@ -449,11 +455,10 @@ class Namespace(Resource):
         self.name = json["metadata"]["name"]
 
         try:
-            self.policy = json["metadata"][
-                "annotations"][POLICY_ANNOTATION_KEY]
+            self.policy = json["spec"]["networkPolicy"]
         except KeyError:
             _log.warning("Namespace does not have policy, assumed closed")
-            self.policy = "closed"
+            self.policy = "Open"
 
     def get_key(self):
         return self.name
@@ -470,13 +475,13 @@ class Namespace(Resource):
         # Determine rule set based on policy
         default_allow = Rule(action="allow")
 
-        if self.policy == "open":
+        if self.policy == "Open":
             rules = Rules(id=ns_tag,
                           inbound_rules=[default_allow],
                           outbound_rules=[default_allow])
             _log.info("Applying Open Rules to NS Profile %s" % ns_tag)
 
-        elif self.policy == "closed":
+        elif self.policy == "Closed":
             rules = Rules(id=ns_tag,
                           inbound_rules=[Rule(action="allow", src_tag=ns_tag)],
                           outbound_rules=[default_allow])
@@ -484,7 +489,7 @@ class Namespace(Resource):
 
         else:
             _log.error(
-                "Namespace %s policy is neither open nor closed" % self.name)
+                "Namespace %s policy is neither Open nor Closed" % self.name)
             return False
 
         # Write rules to profile
@@ -507,7 +512,7 @@ def _keep_watch(queue, resource):
     """
     while True:
         try:
-            response = _get_api_path("watch/%s" % path)
+            response = _get_api_stream(resource)
             for line in response.iter_lines():
                 if line:
                     queue.put(line)
@@ -515,7 +520,7 @@ def _keep_watch(queue, resource):
             # If we hit an exception attempting to watch this path, log it, and retry the watch
             # after a short sleep in order to prevent tight-looping.  We catch all BaseExceptions
             # so that the thread never dies.
-            _log.exception("Exception watching path %s", path)
+            _log.exception("Exception watching path %s", resource)
             time.sleep(10)
 
 

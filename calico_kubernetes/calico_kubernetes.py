@@ -14,7 +14,7 @@ from netaddr import IPAddress, AddrFormatError
 from logutils import configure_logger
 import pycalico
 from pycalico import netns
-from pycalico.datastore import IF_PREFIX, DatastoreClient, PROFILE_PATH
+from pycalico.datastore import IF_PREFIX, DatastoreClient, RULES_PATH
 from pycalico.util import generate_cali_interface_name, get_host_ips
 from pycalico.ipam import IPAMClient
 from pycalico.block import AlreadyAssignedError
@@ -28,7 +28,6 @@ ORCHESTRATOR_ID = "docker"
 HOSTNAME = socket.gethostname()
 
 ANNOTATION_NAMESPACE = "projectcalico.org"
-POLICY_ANNOTATION_KEY = "%s/policy" % ANNOTATION_NAMESPACE
 EPID_ANNOTATION_KEY = "%s/endpointID" % ANNOTATION_NAMESPACE
 
 ETCD_AUTHORITY_ENV = "ETCD_AUTHORITY"
@@ -90,20 +89,12 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
 
         logger.info('Deleting container %s with profile %s',
                     self.docker_id, self.profile_name)
 
         # Remove the profile for the workload.
         self._container_remove()
-
-        # Delete profile
-        try:
-            self._datastore_client.remove_profile(self.profile_name)
-        except:
-            logger.warning("Cannot remove profile %s; Profile cannot be found.",
-                           self.profile_name)
 
     def status(self, namespace, pod_name, docker_id):
         self.namespace = namespace
@@ -118,18 +109,21 @@ class NetworkPlugin(object):
                 workload_id=self.docker_id
             )
         except KeyError:
-            logger.error("Container %s doesn't contain any endpoints" % self.docker_id)
+            logger.error(
+                "Container %s doesn't contain any endpoints" % self.docker_id)
             sys.exit(1)
 
         # Retrieve IPAddress from the attached IPNetworks on the endpoint
         # Since Kubernetes only supports ipv4, we'll only check for ipv4 nets
-        if not endpoint.ipv4_nets :
-            logger.error("Exiting. No IPs attached to endpoint %s", self.docker_id)
+        if not endpoint.ipv4_nets:
+            logger.error(
+                "Exiting. No IPs attached to endpoint %s", self.docker_id)
             sys.exit(1)
         else:
             ip_net = list(endpoint.ipv4_nets)
             if len(ip_net) is not 1:
-                logger.warning("There is more than one IPNetwork attached to endpoint %s", self.docker_id)
+                logger.warning(
+                    "There is more than one IPNetwork attached to endpoint %s", self.docker_id)
             ip = ip_net[0].ip
 
         logger.info("Retrieved IP Address: %s", ip)
@@ -140,7 +134,8 @@ class NetworkPlugin(object):
             "ip": str(ip)
         }
 
-        logger.debug("Writing json dict to stdout: \n%s", json.dumps(json_dict))
+        logger.debug(
+            "Writing json dict to stdout: \n%s", json.dumps(json_dict))
         print json.dumps(json_dict)
 
     def _configure_profile(self, endpoint):
@@ -155,7 +150,7 @@ class NetworkPlugin(object):
 
         if self._datastore_client.profile_exists(self.profile_name):
             logger.warning("Profile with name %s already exists.",
-                         self.profile_name)
+                           self.profile_name)
         else:
             self._datastore_client.create_profile(self.profile_name)
             self._apply_rules()
@@ -164,7 +159,7 @@ class NetworkPlugin(object):
         logger.info('Setting profile %s on endpoint %s',
                     self.profile_name, endpoint.endpoint_id)
 
-        self._datastore_client.append_profiles_to_endpoint(profile_names=[self.profile_name], 
+        self._datastore_client.append_profiles_to_endpoint(profile_names=[self.profile_name],
                                                            endpoint_id=endpoint.endpoint_id)
         logger.info('Finished configuring profile.')
 
@@ -188,7 +183,8 @@ class NetworkPlugin(object):
         self._delete_docker_interface()
         logger.info('Configuring Calico network interface')
         ep = self._container_add(container_pid, interface)
-        interface_name = generate_cali_interface_name(IF_PREFIX, ep.endpoint_id)
+        interface_name = generate_cali_interface_name(
+            IF_PREFIX, ep.endpoint_id)
         node_ip = self._get_node_ip()
         logger.info('Adding IP %s to interface %s', node_ip, interface_name)
 
@@ -222,7 +218,8 @@ class NetworkPlugin(object):
             # Calico doesn't know about this container.  Continue.
             pass
         else:
-            logger.error("This container has already been configured with Calico Networking.")
+            logger.error(
+                "This container has already been configured with Calico Networking.")
             sys.exit(1)
 
         # Obtain information from Docker Client and validate container state
@@ -244,7 +241,8 @@ class NetworkPlugin(object):
         if CALICO_NETWORKING == 'true':
             # Create the veth, move into the container namespace, add the IP and
             # set up the default routes.
-            logger.info("Creating the veth with namespace pid %s on interface name %s", pid, interface)
+            logger.info(
+                "Creating the veth with namespace pid %s on interface name %s", pid, interface)
             ep.mac = ep.provision_veth(netns.PidNamespace(pid), interface)
 
         logger.info("Setting mac address %s to endpoint %s", ep.mac, ep.name)
@@ -253,7 +251,8 @@ class NetworkPlugin(object):
         # Give Kubernetes a link to the endpoint
         resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
                         {"namespace": self.namespace, "podname": self.pod_name}
-        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % (EPID_ANNOTATION_KEY, ep.endpoint_id)
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % (
+            EPID_ANNOTATION_KEY, ep.endpoint_id)
         self._patch_api(path=resource_path, patch=ep_data)
 
         # Let the caller know what endpoint was created.
@@ -278,7 +277,8 @@ class NetworkPlugin(object):
                 ip_list, ipv6_addrs = self._datastore_client.auto_assign_ips(
                     1, 0, self.docker_id, None)
                 ip = ip_list[0]
-                logger.debug("ip_list is %s; ipv6_addrs is %s", ip_list, ipv6_addrs)
+                logger.debug(
+                    "ip_list is %s; ipv6_addrs is %s", ip_list, ipv6_addrs)
                 assert not ipv6_addrs
             except RuntimeError as err:
                 logger.error("Cannot auto assign IPAddress: %s", err.message)
@@ -306,19 +306,22 @@ class NetworkPlugin(object):
                 workload_id=self.docker_id
             )
         except KeyError:
-            logger.exception("Container %s doesn't contain any endpoints", self.docker_id)
+            logger.exception(
+                "Container %s doesn't contain any endpoints", self.docker_id)
             sys.exit(1)
 
         # Remove any IP address assignments that this endpoint has
         ip_set = set()
         for net in endpoint.ipv4_nets | endpoint.ipv6_nets:
             ip_set.add(net.ip)
-        logger.info("Removing IP addresses %s from endpoint %s", ip_set, endpoint.name)
+        logger.info(
+            "Removing IP addresses %s from endpoint %s", ip_set, endpoint.name)
         self._datastore_client.release_ips(ip_set)
 
         # Remove the veth interface from endpoint
         if CALICO_NETWORKING == 'true':
-            logger.info("Removing veth interface from endpoint %s", endpoint.name)
+            logger.info(
+                "Removing veth interface from endpoint %s", endpoint.name)
             try:
                 netns.remove_veth(endpoint.name)
             except CalledProcessError:
@@ -345,7 +348,8 @@ class NetworkPlugin(object):
 
         # We can't set up Calico if the container shares the host namespace.
         if info["HostConfig"]["NetworkMode"] == "host":
-            logger.error("Can't add the container to Calico because it is running NetworkMode = host.")
+            logger.error(
+                "Can't add the container to Calico because it is running NetworkMode = host.")
             sys.exit(1)
 
     def _get_container_info(self, container_name):
@@ -353,7 +357,8 @@ class NetworkPlugin(object):
             info = self._docker_client.inspect_container(container_name)
         except APIError as e:
             if e.response.status_code == 404:
-                logger.error("Container %s was not found. Exiting.", container_name)
+                logger.error(
+                    "Container %s was not found. Exiting.", container_name)
             else:
                 logger.error(e.message)
             sys.exit(1)
@@ -364,7 +369,8 @@ class NetworkPlugin(object):
 
     def _read_docker_ip(self):
         """Get the IP for the pod's infra container."""
-        ip = self._get_container_info(self.docker_id)["NetworkSettings"]["IPAddress"]
+        ip = self._get_container_info(
+            self.docker_id)["NetworkSettings"]["IPAddress"]
         logger.info('Docker-assigned IP is %s', ip)
         return IPAddress(ip)
 
@@ -400,11 +406,11 @@ class NetworkPlugin(object):
         netns_file = '/var/run/netns/' + pid
         if not os.path.isfile(netns_file):
             logger.debug(check_output(['ln', '-s', '/proc/' + pid + '/ns/net',
-                                      netns_file]))
+                                       netns_file]))
 
         # Reach into the netns and delete the docker-allocated interface.
         logger.debug(check_output(['ip', 'netns', 'exec', pid,
-                                  'ip', 'link', 'del', 'eth0']))
+                                   'ip', 'link', 'del', 'eth0']))
 
         # Clean up after ourselves (don't want to leak netns files)
         logger.debug(check_output(['rm', netns_file]))
@@ -433,7 +439,7 @@ class NetworkPlugin(object):
         for pod in pods:
             logger.debug('Processing pod %s', pod)
             if pod['metadata']['namespace'].replace('/', '_') == self.namespace and \
-                pod['metadata']['name'].replace('/', '_') == self.pod_name:
+                    pod['metadata']['name'].replace('/', '_') == self.pod_name:
                 this_pod = pod
                 break
         else:
@@ -451,7 +457,8 @@ class NetworkPlugin(object):
         :return: A list of JSON API objects
         :rtype list
         """
-        logger.info('Getting API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
+        logger.info(
+            'Getting API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
         bearer_token = self._get_api_token()
         session = requests.Session()
         session.headers.update({'Authorization': 'Bearer ' + bearer_token})
@@ -471,13 +478,15 @@ class NetworkPlugin(object):
         :return: A list of JSON API objects
         :rtype list
         """
-        logger.info('Patching API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
+        logger.info(
+            'Patching API Resource: %s from KUBE_API_ROOT: %s', path, KUBE_API_ROOT)
         logger.info('Patching API Resource: with %s', patch)
         bearer_token = self._get_api_token()
         session = requests.Session()
-        session.headers.update({'Authorization': 'Bearer ' + bearer_token, 
+        session.headers.update({'Authorization': 'Bearer ' + bearer_token,
                                 'Content-type': 'application/strategic-merge-patch+json'})
-        response = session.patch(url=KUBE_API_ROOT+path, data=patch, verify=True)
+        response = session.patch(
+            url=KUBE_API_ROOT+path, data=patch, verify=True)
         response_body = response.text
 
         return json.loads(response_body)
@@ -494,51 +503,25 @@ class NetworkPlugin(object):
             with open('/var/lib/kubelet/kubernetes_auth') as f:
                 json_string = f.read()
         except IOError as e:
-            logger.info("Failed to open auth_file (%s), assuming insecure mode" % e)
+            logger.info(
+                "Failed to open auth_file (%s), assuming insecure mode" % e)
             return ""
 
         logger.info('Got kubernetes_auth: ' + json_string)
         auth_data = json.loads(json_string)
         return auth_data['BearerToken']
 
-    def _generate_rules(self):
-        """
-        Returns two lists of rules (inbound and outbound) based on the CALICO_POLICY
-        environment variable.
-
-        If Calico policy is being used (CALICO_POLICY = true) set rules to reject.
-        If Calico policy is not being used (CALICO_POLICY = false) set rules to allow.
-        The daemon will handle setting specific rules.
-
-        :return two lists of rules(arg lists): inbound list of rules (arg lists)
-        outbound list of rules (arg lists)
-        """
-        if CALICO_POLICY == 'true':
-            inbound_rules = [["reject"]]
-            outbound_rules = [["reject"]]
-        else:
-            inbound_rules = [["allow"]]
-            outbound_rules = [["allow"]]
-
-        return inbound_rules, outbound_rules
-
     def _apply_rules(self):
         """
-        Generate a rules for a given profile based on annotations.
-        1) Remove Calicoctl default rules
-        2) Create new profiles based on annotations, and establish new defaults
-
-        Exceptions:
-            If namespace = kube-system (internal kube services), allow all traffic
-            If no policy in annotations, allow from pod's Namespace
-            Outbound policy should allow all traffic
+        Generate a default rules
 
         :return:
         """
         try:
             profile = self._datastore_client.get_profile(self.profile_name)
         except:
-            logger.error("Could not apply rules. Profile not found: %s, exiting", self.profile_name)
+            logger.error(
+                "Could not apply rules. Profile not found: %s, exiting", self.profile_name)
             sys.exit(1)
 
         # Determine rule set based on policy
@@ -552,9 +535,9 @@ class NetworkPlugin(object):
                       outbound_rules=[default_rule])
 
         # Write rules to profile
-        profile_path = PROFILE_PATH % {"profile_id": profile.name}
+        rules_path = RULES_PATH % {"profile_id": profile.name}
         _datastore_client.etcd_client.write(
-            profile_path + "rules", rules.to_json())
+            RULES_PATH, rules.to_json())
 
         logger.info('Finished applying rules.')
 
