@@ -71,7 +71,7 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
+        self._generate_profile_name()
 
         logger.info('Configuring docker container %s', self.docker_id)
 
@@ -89,8 +89,8 @@ class NetworkPlugin(object):
         self.docker_id = docker_id
         self.namespace = namespace
 
-        logger.info('Deleting container %s with profile %s',
-                    self.docker_id, self.profile_name)
+        logger.info('Deleting container %s',
+                    self.docker_id)
 
         # Remove the profile for the workload.
         self._container_remove()
@@ -143,8 +143,6 @@ class NetworkPlugin(object):
 
         Currently assumes one pod with each name.
         """
-        pod = self._get_pod_config()
-
         logger.info('Configuring Pod Profile: %s', self.profile_name)
 
         if self._datastore_client.profile_exists(self.profile_name):
@@ -434,22 +432,6 @@ class NetworkPlugin(object):
                 pass
         return ports
 
-    def _get_pod_config(self):
-        """Get the list of pods from the Kube API server."""
-        pods = self._get_api_path('pods')
-        logger.debug('Got pods %s' % pods)
-
-        for pod in pods:
-            logger.debug('Processing pod %s', pod)
-            if pod['metadata']['namespace'].replace('/', '_') == self.namespace and \
-                    pod['metadata']['name'].replace('/', '_') == self.pod_name:
-                this_pod = pod
-                break
-        else:
-            raise KeyError('Pod not found: ' + self.pod_name)
-        logger.debug('Got pod data %s', this_pod)
-        return this_pod
-
     def _get_veth(self, namespace, interface):
         """
         Determine the name if the interface in the host namespace corresponding
@@ -498,7 +480,7 @@ class NetworkPlugin(object):
 
         # The response body contains some metadata, and the pods themselves
         # under the 'items' key.
-        return json.loads(response_body)['items']
+        return json.loads(response_body)
 
     def _patch_api(self, path, patch):
         """
@@ -563,6 +545,22 @@ class NetworkPlugin(object):
                          'a http or https address. Exiting', KUBE_API_ROOT)
             sys.exit(1)
 
+    def _generate_profile_name(self):
+        """
+        Decide how to configure policy based on usage of CALICO_POLICY
+        If incoming pod is a policy agent, override to ALLOW_ALL
+        """
+        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
+
+        try:
+            pod = self._get_api_path("namespaces/%s/pods/%s" % (self.namespace, self.pod_name))
+            if pod["metadata"]["labels"]["projectcalico.org/app"] == "policy-agent":
+                self.profile_name = "ALLOW_ALL"
+                logger.info("Pod %s/%s is a Policy Agent, Allow All" % (self.namespace, self.pod_name))
+        except KeyError:
+            logger.info("Not Policy Agent")
+            pass
+
     def _apply_rules(self):
         """
         Generate a default rules
@@ -577,10 +575,12 @@ class NetworkPlugin(object):
             sys.exit(1)
 
         # Determine rule set based on policy
-        if CALICO_POLICY == 'true':
+        if self.profile_name == "REJECT_ALL":
             default_rule = Rule(action="deny")
+            logger.info("Using deny all rules")
         else:
             default_rule = Rule(action="allow")
+            logger.info("Using allow all rules")
 
         rules = Rules(id=profile.name,
                       inbound_rules=[default_rule],
