@@ -339,8 +339,7 @@ class Namespace(Resource):
         self.name = json["metadata"]["name"]
 
         try:
-            # self.policy = json["spec"]["networkPolicy"]
-            self.policy = json["metadata"]["annotations"]["networkPolicy"]
+            self.policy = json["spec"]["experimentalNetworkPolicy"]
         except KeyError:
             _log.warning("Namespace does not have policy, assumed Open")
             self.policy = "Open"
