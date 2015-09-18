@@ -50,9 +50,6 @@ CALICO_POLICY = os.environ.get('CALICO_POLICY', 'true')
 
 CALICO_NETWORKING = os.environ.get('CALICO_NETWORKING', 'true')
 
-CALICO_POLICY = os.environ.get('CALICO_POLICY', 'false')
-
-
 class NetworkPlugin(object):
 
     def __init__(self):
@@ -197,6 +194,12 @@ class NetworkPlugin(object):
         # Update the endpoint to set the new mac address
         logger.info("Setting mac address %s to endpoint %s", endpoint.mac, endpoint.name)
         self._datastore_client.set_endpoint(endpoint)
+
+        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
+                        {"namespace": self.namespace, "podname": self.pod_name}
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % \
+                  (EPID_ANNOTATION_KEY, endpoint.endpoint_id)
+        self._patch_api(path=resource_path, patch=ep_data)
 
         interface_name = generate_cali_interface_name(IF_PREFIX, endpoint.endpoint_id)
         node_ip = self._get_node_ip()
@@ -575,7 +578,7 @@ class NetworkPlugin(object):
 
         # Determine rule set based on policy
         if CALICO_POLICY == 'true':
-            default_rule = Rule(action="reject")
+            default_rule = Rule(action="deny")
         else:
             default_rule = Rule(action="allow")
 

@@ -32,6 +32,7 @@ _datastore_client = DatastoreClient()
 
 
 class PolicyAgent():
+
     """
     The Policy Agent is responsible for maintaining Watch Threads/Queues and internal resource lists
     """
@@ -50,7 +51,7 @@ class PolicyAgent():
 
     def run(self):
         """
-        PolicyAgent.run() is called at program init to spawn watch threads and parse their responses 
+        PolicyAgent.run() is called at program init to spawn watch threads and parse their responses
         """
         self.init_lists()
         self.init_threads()
@@ -119,7 +120,6 @@ class PolicyAgent():
             r_obj = r_json["object"]
             r_kind = r_obj["kind"]
 
-
             _log.info("%s: %s" % (r_type, r_kind))
 
             if r_kind in ["Namespace", "Service", "Pod", "Endpoints"]:
@@ -153,7 +153,7 @@ class PolicyAgent():
         elif kind == "Service":
             resource_pool = self.changed_services
             obj = Service(target)
-            
+
         elif kind == "Pod":
             resource_pool = self.changed_pods
             obj = Pod(target)
@@ -161,7 +161,6 @@ class PolicyAgent():
         elif kind == "Endpoints":
             resource_pool = self.changed_endpoints
             obj = Endpoints(target)
-
 
         else:
             _log.error(
@@ -255,7 +254,7 @@ class PolicyAgent():
 
         # As endpoint lists change, create/add new profiles to pods as
         # necessary
-        # TODO: if some object not ready for resync, finish loop w/out moving to 
+        # TODO: if some object not ready for resync, finish loop w/out moving to
         # processed list
         for ep_key, ep in self.changed_endpoints.items():
 
@@ -273,7 +272,8 @@ class PolicyAgent():
                 _log.warning("Namespace %s not yet in store" % ep.namespace)
                 continue
 
-            _log.info("Using svc policy %s and ns policy %s" % (svc_policy, ns_policy))
+            _log.info("Using svc policy %s and ns policy %s" %
+                      (svc_policy, ns_policy))
 
             # if namespace is open, or svc is closed, do nothing
             if ns_policy == "Open" or svc_policy == "NamespaceIP":
@@ -288,16 +288,16 @@ class PolicyAgent():
                     for pod in pods:
                         existing_pod = self.match_pod(
                             namespace=ep.namespace, name=pod)
-                        #_log.info("Adding profile %s to pod %s" % (profile, existing_pod))    
+                        #_log.info("Adding profile %s to pod %s" % (profile, existing_pod))
                         if existing_pod:
                             try:
                                 _datastore_client.append_profiles_to_endpoint(profile_names=[profile],
                                                                               endpoint_id=existing_pod.ep_id)
                             except ProfileAlreadyInEndpoint:
                                 _log.warning(
-                                    "Applying %s to Pod %s : Profile Already exists" % (profiles, existing_pod.key))
+                                    "Applying %s to Pod %s : Profile Already exists" % (profile, existing_pod.key))
                         else:
-                            _log.warning("Pod %s is not yet processed" % (pod))    
+                            _log.warning("Pod %s is not yet processed" % (pod))
 
                 # declare Endpoints obj processed
                 self.epRV = ep.RV
@@ -306,13 +306,14 @@ class PolicyAgent():
 
 
 class Resource():
+
     """
-    Resource objects pull pertinent info from json blobs and maintain universal functions  
+    Resource objects pull pertinent info from json blobs and maintain universal functions
     """
 
     def __init__(self, json):
         """
-        On init, each Resource saves the raw json, pulls necessary info (unique), 
+        On init, each Resource saves the raw json, pulls necessary info (unique),
         and defines a unique key identifier
         """
         self.json = json
@@ -329,6 +330,7 @@ class Resource():
 
     def __str__(self):
         return "%s: %s\n%s" % (self.kind, self.key, self.json)
+
 
 class Namespace(Resource):
 
@@ -426,8 +428,10 @@ class Pod(Resource):
     def apply_ns_policy(self):
         ns_tag = "namespace_%s" % self.namespace
 
-        if _datastore_client.profile_exists(ns_tag) and _datastore_client.get_endpoints(endpoint_id=self.ep_id):
+        if self.ep_id and _datastore_client.profile_exists(ns_tag) and _datastore_client.get_endpoints(endpoint_id=self.ep_id):
             try:
+                _log.info("Applying %s NS policy to EP %s" %
+                          (self.namespace, self.ep_id))
                 _datastore_client.append_profiles_to_endpoint(profile_names=[ns_tag],
                                                               endpoint_id=self.ep_id)
             except ProfileAlreadyInEndpoint:
@@ -444,7 +448,7 @@ class Pod(Resource):
         """
         remove the default reject all rule programmed by the plugin
         """
-        default_profile = "DENY_ALL"
+        default_profile = "REJECT_ALL"
         try:
             _log.info("Removing Default Profile")
             _datastore_client.remove_profiles_from_endpoint(profile_names=[default_profile],
@@ -508,7 +512,7 @@ class Endpoints(Resource):
             port_rules = list()
             for port_spec in subset["ports"]:
                 dst_port = verify_args(port_spec, "port")
-                protocol = verify_args(port_spec, "protocol")
+                protocol = verify_args(port_spec, "protocol").lower()
                 if protocol and dst_port:
                     port_rules.append(Rule(action="allow",
                                            dst_ports=[dst_port],
