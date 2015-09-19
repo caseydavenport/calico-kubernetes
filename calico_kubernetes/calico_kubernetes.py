@@ -15,6 +15,7 @@ from logutils import configure_logger
 import pycalico
 from pycalico import netns
 from pycalico.datastore import IF_PREFIX, DatastoreClient, RULES_PATH
+from pycalico.datastore_datatypes import Rule, Rules
 from pycalico.util import generate_cali_interface_name, get_host_ips
 from pycalico.ipam import IPAMClient
 from pycalico.block import AlreadyAssignedError
@@ -46,11 +47,7 @@ KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
 # If True, use libcalico's auto_assign IPAM to create container.
 CALICO_IPAM = os.environ.get('CALICO_IPAM', 'true')
 
-CALICO_POLICY = os.environ.get('CALICO_POLICY', 'true')
-
-CALICO_NETWORKING = os.environ.get('CALICO_NETWORKING', 'true')
-
-CALICO_POLICY = os.environ.get('CALICO_POLICY', 'false')
+POLICY_ONLY_CALICO = os.environ.get('POLICY_ONLY_CALICO', 'false')
 
 
 class NetworkPlugin(object):
@@ -74,7 +71,7 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
+        self.profile_name = "REJECT_ALL" if POLICY_ONLY_CALICO == 'true' else "ALLOW_ALL"
 
         logger.info('Configuring docker container %s', self.docker_id)
 
@@ -122,11 +119,11 @@ class NetworkPlugin(object):
                 "Exiting. No IPs attached to endpoint %s", self.docker_id)
             sys.exit(1)
         else:
-            ip_net = list(endpoint.ipv4_nets)
-            if len(ip_net) is not 1:
+            ip_nets = list(endpoint.ipv4_nets)
+            if len(ip_nets) is not 1:
                 logger.warning(
                     "There is more than one IPNetwork attached to endpoint %s", self.docker_id)
-            ip = ip_net[0].ip
+            ip = ip_nets[0].ip
 
         logger.info("Retrieved IP Address: %s", ip)
 
@@ -454,34 +451,6 @@ class NetworkPlugin(object):
         logger.debug('Got pod data %s', this_pod)
         return this_pod
 
-    def _get_veth(self, namespace, interface):
-        """
-        Determine the name if the interface in the host namespace corresponding
-        to the opposite end of the veth pair for the specific interface in a
-        container.
-        :param container_id:  The ID or name of the container
-        :param interface:  The name of the interface in the container
-        """
-        try:
-            with netns.NamedNamespace(namespace) as ns:
-                rc = ns.check_output(["ip", "link", "show", interface])
-                container_index = int(rc.split(":")[0].strip())
-        except CalledProcessError:
-            logger.exception("Unable to find interface %s", interface)
-            sys.exit(1)
-        except netns.NamespaceError:
-            logger.exception("Unable to find container")
-            sys.exit(1)
-
-        # The veth index on the host side is 1+ the index on the container side.
-        host_index = container_index + 1
-
-        # List the host interfaces and search for the one with the correct index.
-        interfaces = sh.Command("ip")("link", "show")
-        match = re.search("%d:\s*([^:]*):" % host_index, str(interfaces))
-        logger.debug("Found host index: Returning %s", match.group(1))
-        return match.group(1)
-
     def _get_api_path(self, path):
         """Get a resource from the API specified API path.
 
@@ -560,8 +529,8 @@ class NetworkPlugin(object):
             sys.exit(1)
 
         # Determine rule set based on policy
-        if CALICO_POLICY == 'true':
-            default_rule = Rule(action="reject")
+        if POLICY_ONLY_CALICO == 'true':
+            default_rule = Rule(action="deny")
         else:
             default_rule = Rule(action="allow")
 
@@ -571,8 +540,8 @@ class NetworkPlugin(object):
 
         # Write rules to profile
         rules_path = RULES_PATH % {"profile_id": profile.name}
-        _datastore_client.etcd_client.write(
-            RULES_PATH, rules.to_json())
+        self._datastore_client.etcd_client.write(
+            rules_path, rules.to_json())
 
         logger.info('Finished applying rules.')
 
@@ -597,7 +566,7 @@ if __name__ == '__main__':
         logger.info("Using CALICOCTL_PATH=%s", CALICOCTL_PATH)
         logger.info("Using KUBE_API_ROOT=%s", KUBE_API_ROOT)
         logger.info("Using CALICO_IPAM=%s", CALICO_IPAM)
-        logger.info("Using CALICO_POLICY=%s", CALICO_POLICY)
+        logger.info("Using POLICY_ONLY_CALICO=%s", POLICY_ONLY_CALICO)
 
         if mode == 'setup':
             logger.info('Executing Calico pod-creation hook')
