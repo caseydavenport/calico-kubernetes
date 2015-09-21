@@ -40,9 +40,7 @@ class NetworkPluginTest(unittest.TestCase):
         with patch.object(self.plugin, '_configure_interface',
                     autospec=True) as m_configure_interface, \
                 patch.object(self.plugin, '_configure_profile',
-                    autospec=True) as m_configure_profile, \
-                patch.object(self.plugin, '_generate_profile_name',
-                    autospec=True) as m_generate_profile_name:
+                    autospec=True) as m_configure_profile:
             # Set up mock objects
             m_configure_interface.return_value = 'endpt_id'
 
@@ -65,8 +63,6 @@ class NetworkPluginTest(unittest.TestCase):
     def test_create_error(self):
         with patch.object(self.plugin, '_configure_interface',
                     autospec=True) as m_configure_interface, \
-                patch.object(self.plugin, '_generate_profile_name',
-                    autospec=True) as m_generate_profile_name, \
                 patch('sys.exit', autospec=True) as m_sys_exit:
             # Set up mock objects
             m_configure_interface.side_effect = CalledProcessError(1,'','')
@@ -403,7 +399,7 @@ class NetworkPluginTest(unittest.TestCase):
             m_datastore_client.profile_exists.assert_called_once_with(self.plugin.profile_name)
             m_datastore_client.create_profile.assert_called_once_with(self.plugin.profile_name)
             m_apply_rules.assert_called_once_with()
-            m_datastore_client.append_profiles_to_endpoint.assert_called_once_with(
+            m_datastore_client.set_profiles_on_endpoint.assert_called_once_with(
                 profile_names=[profile_name], endpoint_id=endpoint.endpoint_id)
 
     def test_get_pod_ports(self):
