@@ -71,7 +71,7 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "REJECT_ALL" if POLICY_ONLY_CALICO == 'true' else "ALLOW_ALL"
+        self._generate_profile_name()
 
         logger.info('Configuring docker container %s', self.docker_id)
 
@@ -89,8 +89,8 @@ class NetworkPlugin(object):
         self.docker_id = docker_id
         self.namespace = namespace
 
-        logger.info('Deleting container %s with profile %s',
-                    self.docker_id, self.profile_name)
+        logger.info('Deleting container %s',
+                    self.docker_id)
 
         # Remove the profile for the workload.
         self._container_remove()
@@ -143,8 +143,6 @@ class NetworkPlugin(object):
 
         Currently assumes one pod with each name.
         """
-        pod = self._get_pod_config()
-
         logger.info('Configuring Pod Profile: %s', self.profile_name)
 
         if self._datastore_client.profile_exists(self.profile_name):
@@ -194,6 +192,12 @@ class NetworkPlugin(object):
         # Update the endpoint to set the new mac address
         logger.info("Setting mac address %s to endpoint %s", endpoint.mac, endpoint.name)
         self._datastore_client.set_endpoint(endpoint)
+
+        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
+                        {"namespace": self.namespace, "podname": self.pod_name}
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % \
+                  (EPID_ANNOTATION_KEY, endpoint.endpoint_id)
+        self._patch_api(path=resource_path, patch=ep_data)
 
         interface_name = generate_cali_interface_name(IF_PREFIX, endpoint.endpoint_id)
         node_ip = self._get_node_ip()
@@ -471,7 +475,7 @@ class NetworkPlugin(object):
 
         # The response body contains some metadata, and the pods themselves
         # under the 'items' key.
-        return json.loads(response_body)['items']
+        return json.loads(response_body)
 
     def _patch_api(self, path, patch):
         """
@@ -503,17 +507,54 @@ class NetworkPlugin(object):
         :rtype: str
         """
         logger.info('Getting Kubernetes Authorization')
+
         try:
             with open('/var/lib/kubelet/kubernetes_auth') as f:
                 json_string = f.read()
         except IOError as e:
-            logger.info(
-                "Failed to open auth_file (%s), assuming insecure mode" % e)
-            return ""
+            logger.warning("Failed to open auth_file (%s). Assuming insecure mode", e)
+            if self._api_root_secure():
+                logger.error("Cannot use insecure mode. API root is set to"
+                             "secure (%s). Exiting", KUBE_API_ROOT)
+                sys.exit(1)
+            else:
+                return ""
 
         logger.info('Got kubernetes_auth: ' + json_string)
         auth_data = json.loads(json_string)
         return auth_data['BearerToken']
+
+    def _api_root_secure(self):
+        """
+        Checks whether the KUBE_API_ROOT is secure or insecure.
+        If not an http or https address, exit.
+
+        :return: Boolean: True if secure. False if insecure
+        """
+        if (KUBE_API_ROOT[:5] == 'https'):
+            return True
+        elif (KUBE_API_ROOT[:5] == 'http:'):
+            return False
+        else:
+            logger.error('KUBE_API_ROOT is not set correctly (%s). Please specify '
+                         'a http or https address. Exiting', KUBE_API_ROOT)
+            sys.exit(1)
+
+    def _generate_profile_name(self):
+        """
+        Decide how to configure policy based on usage of CALICO_POLICY
+        If incoming pod is a policy agent, override to ALLOW_ALL
+        """
+        self.profile_name = "REJECT_ALL" if POLICY_ONLY_CALICO == 'true' else "ALLOW_ALL"
+
+        try:
+            pod = self._get_api_path("namespaces/%s/pods/%s" % (self.namespace, self.pod_name))
+            if pod["metadata"]["labels"]["projectcalico.org/app"] == "policy-agent":
+                self.profile_name = "ALLOW_ALL"
+                logger.info("Pod %s/%s is a Policy Agent, Allow All" % (self.namespace, self.pod_name))
+        except KeyError:
+            logger.info("Not Policy Agent")
+            pass
 
     def _apply_rules(self):
         """
@@ -529,10 +570,12 @@ class NetworkPlugin(object):
             sys.exit(1)
 
         # Determine rule set based on policy
-        if POLICY_ONLY_CALICO == 'true':
+        if self.profile_name == "REJECT_ALL":
             default_rule = Rule(action="deny")
+            logger.info("Using deny all rules")
         else:
             default_rule = Rule(action="allow")
+            logger.info("Using allow all rules")
 
         rules = Rules(id=profile.name,
                       inbound_rules=[default_rule],
