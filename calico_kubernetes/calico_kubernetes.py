@@ -433,43 +433,6 @@ class NetworkPlugin(object):
                 pass
         return ports
 
-    def _get_pod_config(self):
-        """Get the list of pods from the Kube API server."""
-        pods = self._get_api_path('pods')
-        logger.debug('Got pods %s' % pods)
-
-        for pod in pods:
-            logger.debug('Processing pod %s', pod)
-            if pod['metadata']['namespace'].replace('/', '_') == self.namespace and \
-                    pod['metadata']['name'].replace('/', '_') == self.pod_name:
-                this_pod = pod
-                break
-        else:
-            raise KeyError('Pod not found: ' + self.pod_name)
-        logger.debug('Got pod data %s', this_pod)
-        return this_pod
-
-    def _get_api_path(self, path):
-        """Get a resource from the API specified API path.
-
-        e.g.
-        _get_api_path('pods')
-
-        :param path: The relative path to an API endpoint.
-        :return: A list of JSON API objects
-        :rtype list
-        """
-        logger.info('Getting API Resource: %s', path)
-        bearer_token = self._get_api_token()
-        session = requests.Session()
-        session.headers.update({'Authorization': 'Bearer ' + bearer_token})
-        response = session.get(KUBE_API_ROOT + path, verify=False)
-        response_body = response.text
-
-        # The response body contains some metadata, and the pods themselves
-        # under the 'items' key.
-        return json.loads(response_body)
-
     def _patch_api(self, path, patch):
         """
         Patch an api resource to a given path
@@ -561,7 +524,7 @@ class NetworkPlugin(object):
 
         rules = Rules(id=profile.name,
                       inbound_rules=[default_rule],
-                      outbound_rules=[default_rule])
+                      outbound_rules=[Rule(action="allow")])
 
         # Write rules to profile
         rules_path = RULES_PATH % {"profile_id": profile.name}
