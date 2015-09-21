@@ -15,6 +15,7 @@ from logutils import configure_logger
 import pycalico
 from pycalico import netns
 from pycalico.datastore import IF_PREFIX, DatastoreClient, RULES_PATH
+from pycalico.datastore_datatypes import Rule, Rules
 from pycalico.util import generate_cali_interface_name, get_host_ips
 from pycalico.ipam import IPAMClient
 from pycalico.block import AlreadyAssignedError
