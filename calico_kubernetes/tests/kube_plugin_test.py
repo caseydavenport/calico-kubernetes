@@ -40,9 +40,13 @@ class NetworkPluginTest(unittest.TestCase):
         with patch.object(self.plugin, '_configure_interface',
                     autospec=True) as m_configure_interface, \
                 patch.object(self.plugin, '_configure_profile',
-                    autospec=True) as m_configure_profile:
+                    autospec=True) as m_configure_profile, \
+                patch.object(self.plugin, '_patch_api',
+                    autospec=True) as m_patch_api:
             # Set up mock objects
-            m_configure_interface.return_value = 'endpt_id'
+            endpoint = Endpoint(TEST_HOST, TEST_ORCH_ID, '1234', '5678',
+                                'active', 'mac')
+            m_configure_interface.return_value = endpoint
 
             # Set up args
             namespace = 'ns'
@@ -58,12 +62,11 @@ class NetworkPluginTest(unittest.TestCase):
             self.assertEqual(pod_name, self.plugin.pod_name)
             self.assertEqual(docker_id, self.plugin.docker_id)
             m_configure_interface.assert_called_once_with()
-            m_configure_profile.assert_called_once_with('endpt_id')
+            m_configure_profile.assert_called_once_with(endpoint)
 
     def test_create_error(self):
         with patch.object(self.plugin, '_configure_interface',
-                    autospec=True) as m_configure_interface, \
-                patch('sys.exit', autospec=True) as m_sys_exit:
+                    autospec=True) as m_configure_interface:
             # Set up mock objects
             m_configure_interface.side_effect = CalledProcessError(1,'','')
 
@@ -73,10 +76,7 @@ class NetworkPluginTest(unittest.TestCase):
             docker_id = 13
 
             # Call method under test
-            self.plugin.create(namespace, pod_name, docker_id)
-
-            # Assert
-            m_sys_exit.assert_called_once_with(1)
+            self.assertRaises(SystemExit, self.plugin.create, namespace, pod_name, docker_id)
 
     def test_delete(self):
         with patch.object(self.plugin, '_datastore_client', autospec=True) as m_datastore_client, \

@@ -47,6 +47,8 @@ KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
 # If True, use libcalico's auto_assign IPAM to create container.
 CALICO_IPAM = os.environ.get('CALICO_IPAM', 'true')
 
+# Flag to indicate whether or not to use Calico Policy.
+# Determines the default policy profile.
 CALICO_POLICY = os.environ.get('CALICO_POLICY', 'false')
 
 
@@ -82,6 +84,13 @@ class NetworkPlugin(object):
             logger.error('Error code %d creating pod networking: %s\n%s',
                          e.returncode, e.output, e)
             sys.exit(1)
+
+        # Give the policy agent a reference to the endpoint in the API
+        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
+                        {"namespace": self.namespace, "podname": self.pod_name}
+        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % (
+            EPID_ANNOTATION_KEY, endpoint.endpoint_id)
+        self._patch_api(path=resource_path, patch=ep_data)
 
     def delete(self, namespace, pod_name, docker_id):
         """Cleanup after a pod."""
@@ -143,10 +152,9 @@ class NetworkPlugin(object):
         logger.info('Configuring Pod Profile: %s', self.profile_name)
 
         if self._datastore_client.profile_exists(self.profile_name):
-            logger.debug("Profile with name %s already exists; no work to do.",
-                           self.profile_name)
+            logger.debug("Profile %s already exists, no work to do", self.profile_name)
         else:
-            logger.info("Creating new profile named %s", self.profile_name)
+            logger.info("Creating Profile %s", self.profile_name)
             self._datastore_client.create_profile(self.profile_name)
             self._apply_rules()
 
@@ -154,9 +162,8 @@ class NetworkPlugin(object):
         logger.info('Setting profile %s on endpoint %s',
                     self.profile_name, endpoint.endpoint_id)
 
-        self._datastore_client.set_profiles_on_endpoint(
-            profile_names=[self.profile_name], endpoint_id=endpoint.endpoint_id
-        )
+        self._datastore_client.set_profiles_on_endpoint(profile_names=[self.profile_name],
+                                                        endpoint_id=endpoint.endpoint_id)
         logger.info('Finished configuring profile.')
 
     def _configure_interface(self):
@@ -192,15 +199,6 @@ class NetworkPlugin(object):
         logger.info("Setting mac address %s to endpoint %s", endpoint.mac, endpoint.name)
         self._datastore_client.set_endpoint(endpoint)
 
-        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
-                        {"namespace": self.namespace, "podname": self.pod_name}
-        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % \
-                  (EPID_ANNOTATION_KEY, endpoint.endpoint_id)
-        self._patch_api(path=resource_path, patch=ep_data)
-
-        interface_name = generate_cali_interface_name(IF_PREFIX, endpoint.endpoint_id)
-        node_ip = self._get_node_ip()
-
         # This is slightly tricky. Since the kube-proxy sometimes
         # programs REDIRECT iptables rules, we MUST have an IP on the host end
         # of the caliXXX veth pairs. This is because the REDIRECT rule
@@ -211,17 +209,10 @@ class NetworkPlugin(object):
         # so we allocate an IP which is already allocated to the node. We set
         # the subnet to /32 so that the routing table is not affected;
         # no traffic for the node_ip's subnet will use the /32 route.
-        logger.info('Adding IP %s to interface %s', node_ip, interface_name)
+        node_ip = self._get_node_ip()
+        logger.info('Adding IP %s to interface %s', node_ip, endpoint.name)
         check_call(['ip', 'addr', 'add', node_ip + '/32',
-                    'dev', interface_name])
-
-        # Annotate the endpoint ID on the pod object so that the policy agent
-        # can look-up the corresponding endpoint for this pod
-        resource_path = "namespaces/%(namespace)s/pods/%(podname)s" % \
-                        {"namespace": self.namespace, "podname": self.pod_name}
-        ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % (
-            EPID_ANNOTATION_KEY, endpoint.endpoint_id)
-        self._patch_api(path=resource_path, patch=ep_data)
+                    'dev', endpoint.name])
 
         logger.info('Finished configuring Calico network interface')
 
