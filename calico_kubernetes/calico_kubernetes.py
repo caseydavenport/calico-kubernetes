@@ -47,7 +47,7 @@ KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
 # If True, use libcalico's auto_assign IPAM to create container.
 CALICO_IPAM = os.environ.get('CALICO_IPAM', 'true')
 
-POLICY_ONLY_CALICO = os.environ.get('POLICY_ONLY_CALICO', 'false')
+CALICO_POLICY = os.environ.get('CALICO_POLICY', 'false')
 
 
 class NetworkPlugin(object):
@@ -545,7 +545,7 @@ class NetworkPlugin(object):
         Decide how to configure policy based on usage of CALICO_POLICY
         If incoming pod is a policy agent, override to ALLOW_ALL
         """
-        self.profile_name = "REJECT_ALL" if POLICY_ONLY_CALICO == 'true' else "ALLOW_ALL"
+        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
 
         try:
             pod = self._get_api_path("namespaces/%s/pods/%s" % (self.namespace, self.pod_name))
@@ -609,7 +609,7 @@ if __name__ == '__main__':
         logger.info("Using CALICOCTL_PATH=%s", CALICOCTL_PATH)
         logger.info("Using KUBE_API_ROOT=%s", KUBE_API_ROOT)
         logger.info("Using CALICO_IPAM=%s", CALICO_IPAM)
-        logger.info("Using POLICY_ONLY_CALICO=%s", POLICY_ONLY_CALICO)
+        logger.info("Using CALICO_POLICY=%s", CALICO_POLICY)
 
         if mode == 'setup':
             logger.info('Executing Calico pod-creation hook')
