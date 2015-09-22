@@ -26,7 +26,6 @@ TEST_HOST = calico_kubernetes.HOSTNAME
 TEST_ORCH_ID = calico_kubernetes.ORCHESTRATOR_ID
 
 
-
 class NetworkPluginTest(unittest.TestCase):
 
     def setUp(self):
@@ -41,7 +40,7 @@ class NetworkPluginTest(unittest.TestCase):
                     autospec=True) as m_configure_interface, \
                 patch.object(self.plugin, '_configure_profile',
                     autospec=True) as m_configure_profile, \
-                patch.object(self.plugin, '_patch_api',
+                patch('calico_kubernetes.calico_kubernetes._patch_api',
                     autospec=True) as m_patch_api:
             # Set up mock objects
             endpoint = Endpoint(TEST_HOST, TEST_ORCH_ID, '1234', '5678',
@@ -113,7 +112,7 @@ class NetworkPluginTest(unittest.TestCase):
                 autospec=True) as m_get_node_ip, \
             patch.object(calico_kubernetes, 'check_call',
                     autospec=True) as m_check_call, \
-            patch.object(self.plugin, '_patch_api',
+            patch('calico_kubernetes.calico_kubernetes._patch_api',
                 autospec=True) as m_patch_api:
             # Set up mock objects
             m_get_container_pid.return_value = 'container_pid'
@@ -429,41 +428,6 @@ class NetworkPluginTest(unittest.TestCase):
 
         # Assert
         self.assertListEqual(return_val, ports)
-
-    def test_get_api_token(self):
-        with patch('__builtin__.open', autospec=True) as m_open, \
-                patch.object(json, 'loads', autospec=True) as m_json:
-            # Set up mock objects
-            m_open().__enter__().read.return_value = 'json_string'
-            m_open.reset_mock()
-            m_json.return_value = {'BearerToken' : 'correct_return'}
-
-            # Call method under test
-            return_val = self.plugin._get_api_token()
-
-            # Assert
-            m_open.assert_called_once_with('/var/lib/kubelet/kubernetes_auth')
-            m_json.assert_called_once_with('json_string')
-            self.assertEqual(return_val, 'correct_return')
-
-    def test_get_api_token_no_auth_file(self):
-        """
-        Test _get_api_token when no autho token is found
-
-        Assert that the method returns an empty string
-        """
-        with patch('__builtin__.open', autospec=True) as m_open, \
-                patch.object(json, 'loads', autospec=True) as m_json:
-            # Set up mock objects
-            m_open.side_effect = IOError
-            m_json.return_value = {'BearerToken' : 'correct_return'}
-
-            # Call method under test
-            return_val = self.plugin._get_api_token()
-
-            m_open.assert_called_once_with('/var/lib/kubelet/kubernetes_auth')
-            self.assertFalse(m_json.called)
-            self.assertEqual(return_val, "")
 
     def test_apply_rules(self):
         with patch.object(self.plugin, '_datastore_client',

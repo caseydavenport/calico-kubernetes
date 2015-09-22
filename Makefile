@@ -24,15 +24,17 @@ binary: kubernetesbuild.created
 	docker run \
 	-u user \
 	-v `pwd`/calico_kubernetes:/code/calico_kubernetes \
+	-v `pwd`/common:/code/common \
 	-v `pwd`/dist:/code/dist \
-	-e PYTHONPATH=/code/calico_kubernetes \
+	-e PYTHONPATH=/code \
 	calico/kubernetes-build pyinstaller calico_kubernetes/calico_kubernetes.py -a -F -s --clean
 
 ut: kubernetesbuild.created
 	docker run --rm -v `pwd`/calico_kubernetes:/code/calico_kubernetes \
 	-v `pwd`/nose.cfg:/code/nose.cfg \
+	-v `pwd`/common:/code/common \
 	calico/kubernetes-build bash -c \
-	'>/dev/null 2>&1 & PYTHONPATH=/code/calico_kubernetes \
+	'>/dev/null 2>&1 & PYTHONPATH=/code \
 	nosetests calico_kubernetes/tests -c nose.cfg'
 
 policyagent.created: $(AGENT_FILES)
@@ -45,6 +47,7 @@ ut-circle: binary
 	# Circle also requires extra options for reporting.
 	docker run \
 	-v `pwd`/calico_kubernetes:/code/calico_kubernetes \
+	-v `pwd`/common:/code/common \
 	-v $(CIRCLE_TEST_REPORTS):/circle_output \
 	-e COVERALLS_REPO_TOKEN=$(COVERALLS_REPO_TOKEN) \
 	calico/kubernetes-build bash -c \

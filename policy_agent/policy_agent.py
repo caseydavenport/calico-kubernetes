@@ -1,31 +1,19 @@
 #!/usr/bin/python
-import os
-import sys
 import time
 import json
 import Queue
 import logging
-import requests
-import pycalico
-
 from threading import Thread
-from subprocess import check_output
-from contextlib import closing
+
+import requests
+
+from common.constants import *
 from pycalico.datastore_datatypes import Rules, Rule
 from pycalico.datastore_errors import ProfileNotInEndpoint, ProfileAlreadyInEndpoint
 from pycalico.datastore import DatastoreClient, PROFILE_PATH
 
-KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
-                               'http://localhost:8080/api/v1/')
-
-ANNOTATION_NAMESPACE = "projectcalico.org/"
-EPID_ANNOTATION_KEY = "%sendpointID" % ANNOTATION_NAMESPACE
-
 POLICY_LOG_DIR = "/var/log/calico/policy"
 POLICY_LOG = "%s/calico.log" % POLICY_LOG_DIR
-
-LOG_FORMAT = '%(asctime)s %(process)d %(levelname)s %(filename)s: %(message)s'
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 
 _log = logging.getLogger(__name__)
 _datastore_client = DatastoreClient()
@@ -447,7 +435,7 @@ class Pod(Resource):
         """
         remove the default reject all rule programmed by the plugin
         """
-        default_profile = "REJECT_ALL"
+        default_profile = DEFAULT_PROFILE_REJECT
         try:
             _log.info("Removing Default Profile")
             _datastore_client.remove_profiles_from_endpoint(profile_names=[default_profile],

@@ -1,35 +1,32 @@
 #!/bin/python
 import json
-import os
 import sys
-import re
 import socket
+from subprocess import check_output, CalledProcessError, check_call
+import logging
+
 from docker import Client
 from docker.errors import APIError
-from subprocess import check_output, CalledProcessError, check_call
-import requests
 import sh
-import logging
 from netaddr import IPAddress, AddrFormatError
+
+from common.util import _patch_api
+from common.constants import *
 from logutils import configure_logger
 import pycalico
 from pycalico import netns
-from pycalico.datastore import IF_PREFIX, DatastoreClient, RULES_PATH
+from pycalico.datastore import RULES_PATH
 from pycalico.datastore_datatypes import Rule, Rules
-from pycalico.util import generate_cali_interface_name, get_host_ips
+from pycalico.util import get_host_ips
 from pycalico.ipam import IPAMClient
 from pycalico.block import AlreadyAssignedError
 
 logger = logging.getLogger(__name__)
 pycalico_logger = logging.getLogger(pycalico.__name__)
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 
 DOCKER_VERSION = "1.16"
 ORCHESTRATOR_ID = "docker"
 HOSTNAME = socket.gethostname()
-
-ANNOTATION_NAMESPACE = "projectcalico.org"
-EPID_ANNOTATION_KEY = "%s/endpointID" % ANNOTATION_NAMESPACE
 
 ETCD_AUTHORITY_ENV = "ETCD_AUTHORITY"
 if ETCD_AUTHORITY_ENV not in os.environ:
@@ -38,9 +35,6 @@ if ETCD_AUTHORITY_ENV not in os.environ:
 # Append to existing env, to avoid losing PATH etc.
 # Need to edit the path here since calicoctl loads client on import.
 CALICOCTL_PATH = os.environ.get('CALICOCTL_PATH', '/usr/bin/calicoctl')
-
-KUBE_API_ROOT = os.environ.get('KUBE_API_ROOT',
-                               'http://kubernetes-master:8080/api/v1/')
 
 # Flag to indicate whether or not to use Calico IPAM.
 # If False, use the default docker container ip address to create container.
@@ -73,7 +67,8 @@ class NetworkPlugin(object):
         self.pod_name = pod_name
         self.docker_id = docker_id
         self.namespace = namespace
-        self.profile_name = "REJECT_ALL" if CALICO_POLICY == 'true' else "ALLOW_ALL"
+        self.profile_name = DEFAULT_PROFILE_REJECT if CALICO_POLICY == 'true' \
+            else DEFAULT_PROFILE_ACCEPT
 
         logger.info('Configuring docker container %s', self.docker_id)
 
@@ -90,7 +85,7 @@ class NetworkPlugin(object):
                         {"namespace": self.namespace, "podname": self.pod_name}
         ep_data = '{"metadata":{"annotations":{"%s":"%s"}}}' % (
             EPID_ANNOTATION_KEY, endpoint.endpoint_id)
-        self._patch_api(path=resource_path, patch=ep_data)
+        _patch_api(path=resource_path, patch=ep_data)
 
     def delete(self, namespace, pod_name, docker_id):
         """Cleanup after a pod."""
@@ -424,66 +419,6 @@ class NetworkPlugin(object):
                 pass
         return ports
 
-    def _patch_api(self, path, patch):
-        """
-        Patch an api resource to a given path
-
-        :param path: The relative path to an API endpoint.
-        :param patch: The updated data
-        :return: A list of JSON API objects
-        :rtype list
-        """
-        logger.debug('Patching API Resource in path %s with data %s', path, patch)
-        bearer_token = self._get_api_token()
-        session = requests.Session()
-        session.headers.update({'Authorization': 'Bearer ' + bearer_token,
-                                'Content-type': 'application/strategic-merge-patch+json'})
-        response = session.patch(url=KUBE_API_ROOT+path, data=patch, verify=True)
-        response_body = response.text
-
-        return json.loads(response_body)
-
-    def _get_api_token(self):
-        """
-        Get the kubelet Bearer token for this node, used for HTTPS auth.
-        If no token exists, this method will return an empty string.
-        :return: The token.
-        :rtype: str
-        """
-        logger.info('Getting Kubernetes Authorization')
-
-        try:
-            with open('/var/lib/kubelet/kubernetes_auth') as f:
-                json_string = f.read()
-        except IOError as e:
-            logger.warning("Failed to open auth_file (%s). Assuming insecure mode", e)
-            if self._api_root_secure():
-                logger.error("Cannot use insecure mode. API root is set to"
-                             "secure (%s). Exiting", KUBE_API_ROOT)
-                sys.exit(1)
-            else:
-                return ""
-
-        logger.info('Got kubernetes_auth: ' + json_string)
-        auth_data = json.loads(json_string)
-        return auth_data['BearerToken']
-
-    def _api_root_secure(self):
-        """
-        Checks whether the KUBE_API_ROOT is secure or insecure.
-        If not an http or https address, exit.
-
-        :return: Boolean: True if secure. False if insecure
-        """
-        if (KUBE_API_ROOT[:5] == 'https'):
-            return True
-        elif (KUBE_API_ROOT[:5] == 'http:'):
-            return False
-        else:
-            logger.error('KUBE_API_ROOT is not set correctly (%s). Please specify '
-                         'a http or https address. Exiting', KUBE_API_ROOT)
-            sys.exit(1)
-
     def _apply_rules(self):
         """
         Generate a default rules for a pod based on the profile name
@@ -506,7 +441,7 @@ class NetworkPlugin(object):
             sys.exit(1)
 
         # Determine rule set based on policy
-        if self.profile_name == "REJECT_ALL":
+        if self.profile_name == DEFAULT_PROFILE_REJECT:
             default_rule = Rule(action="deny")
             logger.info("Using deny all rules")
         else:
