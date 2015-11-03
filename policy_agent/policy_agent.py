@@ -15,17 +15,6 @@ from pycalico.datastore_datatypes import Rules, Rule, Profile
 from pycalico.datastore_errors import ProfileNotInEndpoint, ProfileAlreadyInEndpoint
 from pycalico.datastore import DatastoreClient
 
-KIND_NAMESPACE = "Namespace"
-KIND_SERVICE = "Service"
-KIND_POD = "Pod"
-KIND_ENDPOINTS = "Endpoints"
-VALID_KINDS = [KIND_NAMESPACE, KIND_SERVICE, KIND_POD, KIND_ENDPOINTS]
-
-CMD_ADDED = "ADDED"
-CMD_MODIFIED = "MODIFIED"
-CMD_DELETED = "DELETED"
-VALID_COMMANDS = [CMD_ADDED, CMD_MODIFIED, CMD_DELETED]
-
 logger = logging.getLogger(__name__)
 util_logger = logging.getLogger(common.util.__name__)
 pycalico_logger = logging.getLogger(pycalico.__name__)
@@ -162,6 +151,10 @@ class PolicyAgent():
                     self.process_resource(command=command,
                                           kind=kind,
                                           resource_json=resource_json)
+                elif command == CMD_ERROR:
+                    logger.error("Stream returned an Error. Exiting.")
+                    sys.exit(1)
+
                 update = None
 
             except Queue.Empty, ValueError:
