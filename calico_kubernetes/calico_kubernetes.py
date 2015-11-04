@@ -96,6 +96,8 @@ class NetworkPlugin(object):
                 workload_id=self.docker_id
             )
         except KeyError:
+            # Obtain information from Docker Client and validate container state
+            self._validate_container_state(self.docker_id)
             logger.error("Container %s doesn't contain any endpoints", self.docker_id)
             sys.exit(1)
 
@@ -320,9 +322,9 @@ class NetworkPlugin(object):
 
         # We can't set up Calico if the container shares the host namespace.
         if info["HostConfig"]["NetworkMode"] == "host":
-            logger.error("Can't add the container to Calico because it is "
-                         "running NetworkMode = host.")
-            sys.exit(1)
+            logger.warning("Can't add the container to Calico because it is "
+                           "running NetworkMode = host.")
+            sys.exit(0)
 
     def _get_container_info(self, container_name):
         try:
