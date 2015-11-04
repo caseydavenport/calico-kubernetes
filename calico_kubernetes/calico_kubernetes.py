@@ -495,11 +495,11 @@ def run_protected():
             namespace=namespace,
             pod_name=pod_name,
             docker_id=docker_id)
-    except SystemExit:
+    except SystemExit as e:
         # If a SystemExit is thrown, we've already handled the error and have
         # called sys.exit().  No need to produce a duplicate exception
-        # message, just set the return code to 1.
-        rc = 1
+        # message, just set the return code.
+        rc = e
     except BaseException:
         # Log the exception and set the return code to 1.
         logger.exception("Unhandled Exception killed plugin")
