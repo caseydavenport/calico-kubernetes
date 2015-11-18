@@ -80,6 +80,9 @@ POLICY_ALLOW = "allow"
 POLICY_NONE = "none"
 ALL_POLICIES = [POLICY_NS_ISOLATION, POLICY_ALLOW, POLICY_NONE]
 
+# Global execution timer
+timer = ExecutionTimer(logger)
+
 
 class NetworkPlugin(object):
 
@@ -925,6 +928,7 @@ def run_protected():
     logger.debug("Begin Calico network plugin execution")
     logger.debug('Plugin Args: %s', sys.argv)
     rc = 0
+    timer.start()
     try:
         run(mode=mode,
             namespace=namespace,
@@ -943,6 +947,7 @@ def run_protected():
     finally:
         # Log that we've finished, and exit with the correct return code.
         logger.debug("Calico network plugin execution complete, rc=%s", rc)
+        timer.end()
         sys.exit(rc)
 
 

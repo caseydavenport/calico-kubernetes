@@ -1,8 +1,11 @@
 #!/bin/python
 import logging
-from cloghandler import ConcurrentRotatingFileHandler
 import os
 import sys
+
+from cloghandler import ConcurrentRotatingFileHandler
+from monotime import monotonic
+
 
 LOG_DIR = '/var/log/calico/kubernetes/'
 ROOT_LOG_FORMAT = '%(asctime)s %(process)d %(levelname)s %(message)s'
@@ -64,3 +67,37 @@ class IdentityFilter(logging.Filter):
     def filter(self, record):
         record.identity = self.identity
         return True
+
+
+class ExecutionTimer(object):
+    def __init__(self, logger):
+        self.logger = logger
+        self.start_time = None
+        self.last_mark = None
+
+    def start(self):
+        """
+        Start the execution timer.
+        """
+        time = monotonic()
+        self.start_time = time
+        self.last_mark = time
+        self.logger.debug("[timer] Starting execution")
+
+    def end(self):
+        # Log full execution.
+        self.mark("Finished execution")
+
+        # Clear
+        self.start_time = None
+        self.last_mark = None
+
+    def mark(self, message):
+        """
+        Logs time since last mark, as well as from beginning.
+        """
+        now = monotonic()
+        last = now - self.last_mark
+        total = now - self.start_time
+        self.last_mark = now
+        self.logger.debug("[timer] %s: %s (%s total)", message, last, total)
