@@ -44,7 +44,7 @@ ut: kubernetesbuild.created
 	docker run --rm \
 	-v `pwd`/calico_kubernetes:/code/calico_kubernetes \
 	-v `pwd`/common:/code/common \
-	-v `pwd`/nose.cfg:/code/nose.cfg \
+	-v `pwd`/calico_kubernetes/nose.cfg:/code/nose.cfg \
 	calico/kubernetes-build bash -c \
 	'>/dev/null 2>&1 & PYTHONPATH=/code \
 	nosetests calico_kubernetes/tests -c nose.cfg'
@@ -60,8 +60,8 @@ ut-circle: binary
 	-v $(CIRCLE_TEST_REPORTS):/circle_output \
 	-e COVERALLS_REPO_TOKEN=$(COVERALLS_REPO_TOKEN) \
 	calico/kubernetes-build bash -c \
-	'>/dev/null 2>&1 & PYTHONPATH=/code \
-	nosetests calico_kubernetes/tests -c nose.cfg \
+	'>/dev/null 2>&1 & \ 
+	cd calico_kubernetes; nosetests tests -c nose.cfg \
 	--with-xunit --xunit-file=/circle_output/output.xml; RC=$$?;\
 	[[ ! -z "$$COVERALLS_REPO_TOKEN" ]] && coveralls || true; exit $$RC'
 
