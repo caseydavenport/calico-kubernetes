@@ -67,7 +67,7 @@ LOG_LEVEL_VAR = "LOG_LEVEL"
 KUBE_AUTH_TOKEN_VAR = "KUBE_AUTH_TOKEN"
 KUBE_API_ROOT_VAR = "KUBE_API_ROOT"
 CALICO_IPAM_VAR = "CALICO_IPAM"
-DEFAULT_POLICY_VAR = "DEFAULT_POLICY"
+CALICO_POLICY_VAR = "CALICO_POLICY"
 
 # All environment variables used by the plugin.
 ENVIRONMENT_VARS = [ETCD_AUTHORITY_VAR,
@@ -75,29 +75,29 @@ ENVIRONMENT_VARS = [ETCD_AUTHORITY_VAR,
                     KUBE_AUTH_TOKEN_VAR,
                     KUBE_API_ROOT_VAR,
                     CALICO_IPAM_VAR,
-                    DEFAULT_POLICY_VAR]
+                    CALICO_POLICY_VAR]
 
 
 class NetworkPlugin(object):
 
     def __init__(self, config):
+        # These get set in the create / delete / status methods.
         self.pod_name = None
         self.namespace = None
         self.docker_id = None
-        self.policy_enabled = CALICO_POLICY == 'true'
-
-        # Determine profile to use.
-        if self.policy_enabled:
-            self.profile_name = DEFAULT_PROFILE_REJECT
-        else:
-            self.profile_name = DEFAULT_PROFILE_ACCEPT
 
         # Get configuration from the given dictionary.
         logger.debug("Plugin running with config: %s", config)
         self.auth_token = config[KUBE_AUTH_TOKEN_VAR]
         self.api_root = config[KUBE_API_ROOT_VAR]
         self.calico_ipam = config[CALICO_IPAM_VAR].lower()
-        self.default_policy = config[DEFAULT_POLICY_VAR].lower()
+        self.policy_enabled = config[CALICO_POLICY_VAR]
+
+        # Determine profile to use.
+        if self.policy_enabled:
+            self.profile_name = DEFAULT_PROFILE_REJECT
+        else:
+            self.profile_name = DEFAULT_PROFILE_ACCEPT
 
         self._datastore_client = IPAMClient()
         self._docker_client = Client(
@@ -632,7 +632,7 @@ def read_config_file():
         ETCD_AUTHORITY_VAR: "127.0.0.1:2379",
         CALICO_IPAM_VAR: "true",
         KUBE_API_ROOT_VAR: "http://kubernetes-master:8080/api/v1",
-        DEFAULT_POLICY_VAR: "allow",
+        CALICO_POLICY_VAR: "false",
         KUBE_AUTH_TOKEN_VAR: None,
         LOG_LEVEL_VAR: "INFO",
     }
